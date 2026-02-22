@@ -41,10 +41,21 @@
             <h3>Documents</h3>
             <button id="deleteAllBtn" class="delete-all-btn" type="button">Delete All</button>
           </div>
+          <div class="scope-controls">
+            <label class="scope-select-all">
+              <input id="selectAllDocs" type="checkbox" checked />
+              <span>Select all ready docs</span>
+            </label>
+            <span id="scopeSummary" class="scope-summary">0/0 selected</span>
+          </div>
           <ul id="docList" class="doc-list"></ul>
         </div>
         <div class="chat">
           <h3>Chat</h3>
+          <label class="chat-option">
+            <input id="includeDocSummaries" type="checkbox" checked />
+            <span>Include document summaries</span>
+          </label>
           <div id="chatLog" class="chat-log"></div>
           <div class="chat-input">
             <input id="chatInput" type="text" placeholder="Ask about your documents..." />

@@ -133,6 +133,34 @@ button:hover {
   margin: 0;
 }
 
+.scope-controls {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.scope-select-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.scope-select-all input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.scope-summary {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
 .delete-all-btn {
   background: rgba(255, 255, 255, 0.08);
   color: var(--text);
@@ -161,6 +189,31 @@ button:hover {
   justify-content: space-between;
   align-items: flex-start;
   gap: 12px;
+}
+
+.doc-main-wrap {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+}
+
+.doc-scope-toggle {
+  display: inline-flex;
+  align-items: center;
+  margin-top: 2px;
+}
+
+.doc-scope-toggle input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.doc-scope-toggle input:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .doc-main {
@@ -205,6 +258,22 @@ button:hover {
   padding-right: 8px;
 }
 
+.chat-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.chat-option input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
 .message {
   padding: 12px;
   border-radius: 14px;
@@ -220,6 +289,43 @@ button:hover {
   font-size: 0.75rem;
   color: var(--muted);
   margin-bottom: 6px;
+}
+
+.answer-body p {
+  margin: 0 0 12px;
+  line-height: 1.5;
+}
+
+.answer-body p:last-child {
+  margin-bottom: 0;
+}
+
+.sources-body {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.sources-title {
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.source-item {
+  margin: 0 0 10px;
+  line-height: 1.45;
+}
+
+.source-item:last-child {
+  margin-bottom: 0;
+}
+
+.source-empty {
+  margin: 0;
+  color: var(--muted);
 }
 
 .chat-input {

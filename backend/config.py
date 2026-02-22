@@ -35,6 +35,7 @@ ENABLE_RERANKER = _env_bool("ENABLE_RERANKER", True)
 RERANK_MODEL_ID = os.getenv("RERANK_MODEL_ID", "cross-encoder/ms-marco-MiniLM-L-6-v2")
 RERANK_DEVICE = os.getenv("RERANK_DEVICE", "auto")
 RERANK_TOP_N = int(os.getenv("RERANK_TOP_N", "20"))
+ENABLE_AI_INGEST_SUMMARIES = _env_bool("ENABLE_AI_INGEST_SUMMARIES", False)
 
 def ensure_dirs() -> None:
     for path in (UPLOAD_DIR, PROCESSED_DIR, INDEX_DIR, DB_DIR):

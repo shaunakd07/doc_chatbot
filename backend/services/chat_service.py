@@ -32,7 +32,13 @@ class ChatService:
         self.last_generation_error: str | None = None
         self.last_route: dict[str, Any] | None = None
 
-    def answer(self, question: str, doc_ids: Optional[List[str]] = None, top_k: int = 5) -> dict:
+    def answer(
+        self,
+        question: str,
+        doc_ids: Optional[List[str]] = None,
+        top_k: int = 5,
+        include_document_summaries: bool = True,
+    ) -> dict:
         route = self._route_question(question, doc_ids, default_top_k=top_k)
         self.last_route = route
         intent = "compare" if route.get("needs_cross_doc") else str(route.get("task_type", "qa"))
@@ -64,6 +70,7 @@ class ChatService:
             if image_intent:
                 chunks = self._augment_for_image_queries(question, chunks, doc_ids=doc_ids, mode=retrieval_mode)
 
+        chunks = self._dedupe_redundant_chunks(chunks, limit=max(24, route_top_k * 4))
         context_blocks = self._build_context_blocks(chunks)
         
         image_paths: List[str] = []
@@ -85,7 +92,12 @@ class ChatService:
                 logger.warning(f"Could not load image {path}: {e}")
 
         if intent == "compare":
-            prompt = build_compare_prompt(question, context_blocks, self._document_briefs(chunks))
+            prompt = build_compare_prompt(
+                question,
+                context_blocks,
+                self._document_briefs(chunks),
+                include_document_summaries=include_document_summaries,
+            )
         else:
             prompt = build_prompt(question, context_blocks)
             
@@ -101,19 +113,25 @@ class ChatService:
                     question,
                     chunks,
                     intent=intent,
+                    include_document_summaries=include_document_summaries,
                 )
         else:
             answer = self._fallback_answer(
                 question,
                 chunks,
                 intent=intent,
+                include_document_summaries=include_document_summaries,
             )
+
+        if intent == "compare" and not include_document_summaries:
+            answer = self._strip_document_summaries(answer)
 
         response = {
             "answer": answer,
-            "sources": chunks,
+            "sources": self._prepare_response_sources(chunks, intent=intent),
             "intent": intent,
             "route": route,
+            "include_document_summaries": include_document_summaries,
         }
         if self.last_generation_error:
             response["generation_error"] = self.last_generation_error
@@ -143,12 +161,17 @@ class ChatService:
         question: str,
         chunks: List[dict],
         intent: str = "qa",
+        include_document_summaries: bool = True,
     ) -> str:
         if not chunks:
             return "I could not find relevant content in your uploaded documents."
 
         if intent == "compare":
-            return self._fallback_compare_answer(question, chunks)
+            return self._fallback_compare_answer(
+                question,
+                chunks,
+                include_document_summaries=include_document_summaries,
+            )
 
         excerpts: List[str] = []
         for chunk in chunks[:3]:
@@ -167,7 +190,12 @@ class ChatService:
             + "\n".join(excerpts)
         )
 
-    def _fallback_compare_answer(self, question: str, chunks: List[dict]) -> str:
+    def _fallback_compare_answer(
+        self,
+        question: str,
+        chunks: List[dict],
+        include_document_summaries: bool = True,
+    ) -> str:
         grouped: dict[str, list[dict]] = defaultdict(list)
         for chunk in chunks:
             grouped[str(chunk.get("doc_id"))].append(chunk)
@@ -176,6 +204,19 @@ class ChatService:
                 "I found evidence from only one document for this comparison question. "
                 "Please select at least two documents or ask a single-document question."
             )
+
+        if not include_document_summaries:
+            lines = [
+                f"I could not run full model generation, but here are key comparison excerpts for '{question}':"
+            ]
+            top_chunks = sorted(chunks, key=lambda c: float(c.get("score", 0.0)), reverse=True)[:6]
+            for chunk in top_chunks:
+                text = " ".join(str(chunk.get("content", "")).split())
+                if not text:
+                    continue
+                source = f"[source:{chunk['doc_id']}:{chunk.get('page','?')}:{chunk['id']}]"
+                lines.append(f"- {text[:210].rstrip()}... {source}")
+            return "\n".join(lines)
 
         lines = [
             f"I could not run full model generation, but here are key points per document for '{question}':"
@@ -323,6 +364,49 @@ class ChatService:
                 best_by_id[chunk_id] = chunk
         return sorted(best_by_id.values(), key=lambda c: float(c.get("score", 0.0)), reverse=True)[:limit]
 
+    def _dedupe_redundant_chunks(self, chunks: List[dict], limit: int = 0) -> List[dict]:
+        deduped: List[dict] = []
+        seen: set[tuple[str, str, str]] = set()
+        for chunk in chunks:
+            filename = str(chunk.get("doc_filename") or "").strip().lower()
+            page = str(chunk.get("page") or "?").strip()
+            content = re.sub(r"\s+", " ", str(chunk.get("content", "")).strip().lower())
+            if not content:
+                continue
+            key = (filename, page, content[:240])
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(chunk)
+            if limit and len(deduped) >= limit:
+                break
+        return deduped
+
+    def _prepare_response_sources(self, chunks: List[dict], intent: str) -> List[dict]:
+        max_total = 16 if intent == "compare" else 12
+        per_doc_limit = 1 if intent == "compare" else 2
+        by_doc_count: dict[str, int] = defaultdict(int)
+        seen_keys: set[tuple[str, str]] = set()
+        compact: List[dict] = []
+        for chunk in chunks:
+            doc_id = str(chunk.get("doc_id") or "").strip()
+            if not doc_id:
+                continue
+            content = re.sub(r"\s+", " ", str(chunk.get("content", "")).strip().lower())
+            if not content:
+                continue
+            if by_doc_count[doc_id] >= per_doc_limit:
+                continue
+            key = (doc_id, content[:220])
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            by_doc_count[doc_id] += 1
+            compact.append(chunk)
+            if len(compact) >= max_total:
+                break
+        return compact
+
     def _document_briefs(self, chunks: List[dict]) -> List[str]:
         grouped: dict[str, list[dict]] = defaultdict(list)
         for chunk in chunks:
@@ -330,7 +414,13 @@ class ChatService:
             if doc_id:
                 grouped[doc_id].append(chunk)
         briefs: List[str] = []
-        for doc_id, doc_chunks in grouped.items():
+        seen_brief_keys: set[tuple[str, str]] = set()
+        ranked_docs = sorted(
+            grouped.items(),
+            key=lambda item: max((float(c.get("score", 0.0)) for c in item[1]), default=0.0),
+            reverse=True,
+        )
+        for doc_id, doc_chunks in ranked_docs:
             top = sorted(doc_chunks, key=lambda c: float(c.get("score", 0.0)), reverse=True)[:3]
             filename = top[0].get("doc_filename") or doc_id
             created_at = top[0].get("doc_created_at") or "unknown date"
@@ -340,8 +430,36 @@ class ChatService:
                 if content:
                     summary_lines.append(content[:180].rstrip())
             if summary_lines:
+                filename_key = re.sub(r"\s+", " ", str(filename).strip().lower())
+                evidence_key = re.sub(r"\s+", " ", " ".join(summary_lines[:2]).strip().lower())[:220]
+                brief_key = (filename_key, evidence_key)
+                if brief_key in seen_brief_keys:
+                    continue
+                seen_brief_keys.add(brief_key)
                 briefs.append(
                     f"Document: {filename} (doc_id={doc_id}, created_at={created_at})\n"
                     f"Key evidence: {' | '.join(summary_lines)}"
                 )
         return briefs
+
+    def _strip_document_summaries(self, text: str) -> str:
+        raw = str(text or "").replace("\r\n", "\n").strip()
+        if not raw:
+            return raw
+        patterns = [
+            r"\n+\s*document summaries\s*\n",
+            r"\n+\s*document summary\s*\n",
+            r"\n+\s*document summaries\s*/\s*sources\s*\n",
+            r"\n+\s*summaries\s*\n",
+        ]
+        lower_raw = raw.lower()
+        cut_index = -1
+        for pattern in patterns:
+            match = re.search(pattern, lower_raw, flags=re.IGNORECASE)
+            if match:
+                idx = match.start()
+                if cut_index == -1 or idx < cut_index:
+                    cut_index = idx
+        if cut_index > 0:
+            raw = raw[:cut_index].rstrip()
+        return raw

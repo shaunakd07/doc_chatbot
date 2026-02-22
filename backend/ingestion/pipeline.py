@@ -2,11 +2,8 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import List
-import base64
-
-from PIL import Image
 
 from .extractors import (
     extract_docx,
@@ -36,10 +33,6 @@ TEXT_EXTENSIONS = {
 }
 SPREADSHEET_EXTENSIONS = {".xlsx", ".xlsm", ".xltx", ".xltm", ".xls"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tiff", ".bmp", ".gif", ".webp"}
-
-def _encode_image_file(image_path: Path) -> str:
-    with image_path.open("rb") as f:
-        return base64.b64encode(f.read()).decode("utf-8")
 
 def ingest_file(
     file_path: Path,
@@ -101,17 +94,15 @@ def ingest_file(
                     image.save(target, format="PNG")
                     image_path = str(target)
                     metadata["image_path"] = image_path
-                    
-                    # Instead of local OCR or complex diagram graphs, we use gpt-4o-mini to get a 
-                    # detailed text description to embed so we can hybrid-search it later.
-                    if vlm is not None and hasattr(vlm, "answer_image_question"):
-                        prompt = "Describe this page in high detail. Extract all textual content, describe any tables row by row, and explain any flowcharts, diagrams or logic presented."
+                    if config.ENABLE_AI_INGEST_SUMMARIES and vlm is not None and hasattr(vlm, "answer_image_question"):
+                        prompt = (
+                            "Describe this page in high detail. Extract all textual content, describe any "
+                            "tables row by row, and explain any flowcharts, diagrams or logic presented."
+                        )
                         try:
-                            with Image.open(target) as saved_img:
-                                desc = vlm.answer_image_question(saved_img, prompt)
-                                text += f"\n[AI Visual Summary]: {desc}\n"
+                            desc = vlm.answer_image_question(image, prompt)
+                            text += f"\n[AI Visual Summary]: {desc}\n"
                         except Exception as e:
-                            # Log and fall back to minimal text if vision proxy fails.
                             print(f"[Ingestion] Failed to get vision summary for {image_name}: {e}")
                 except Exception as e:
                     print(f"Error saving image: {e}")
@@ -160,7 +151,18 @@ def create_document_record(filename: str) -> str:
     return doc_id
 
 
+def _safe_relative_upload_path(filename: str) -> Path:
+    raw = str(filename or "").replace("\\", "/")
+    parts = [part for part in PurePosixPath(raw).parts if part not in {"", ".", ".."}]
+    if not parts:
+        parts = ["upload.bin"]
+    return Path(*parts)
+
+
 def safe_path_for_upload(filename: str, doc_id: str) -> Path:
     upload_dir = config.UPLOAD_DIR / doc_id
     upload_dir.mkdir(parents=True, exist_ok=True)
-    return upload_dir / filename
+    relative_path = _safe_relative_upload_path(filename)
+    destination = upload_dir / relative_path
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    return destination

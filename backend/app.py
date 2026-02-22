@@ -59,10 +59,40 @@ class ChatRequest(BaseModel):
     message: str
     doc_ids: list[str] | None = None
     top_k: int | None = None
+    include_document_summaries: bool = True
 
 
 class DriveRequest(BaseModel):
     url: str
+
+
+def _validate_doc_scope(doc_ids: list[str]) -> tuple[list[str] | None, str | None]:
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for raw in doc_ids:
+        doc_id = str(raw).strip()
+        if not doc_id or doc_id in seen:
+            continue
+        seen.add(doc_id)
+        cleaned.append(doc_id)
+
+    if not cleaned:
+        return None, "Select at least one ready document before sending a chat request."
+
+    documents = {str(doc.get("id")): doc for doc in storage.list_documents()}
+    unknown = [doc_id for doc_id in cleaned if doc_id not in documents]
+    if unknown:
+        return None, f"Unknown document id(s): {', '.join(unknown[:5])}"
+
+    not_ready = [
+        doc_id
+        for doc_id in cleaned
+        if str((documents.get(doc_id) or {}).get("status", "")).lower() != "ready"
+    ]
+    if not_ready:
+        return None, f"Document(s) are not ready: {', '.join(not_ready[:5])}"
+
+    return cleaned, None
 
 
 @app.on_event("startup")
@@ -185,9 +215,13 @@ def get_document(doc_id: str) -> JSONResponse:
 @app.post("/api/documents")
 def upload_document(background_tasks: BackgroundTasks, file: UploadFile = File(...)) -> JSONResponse:
     doc_id = create_document_record(file.filename)
-    destination = safe_path_for_upload(file.filename, doc_id)
-    with destination.open("wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    try:
+        destination = safe_path_for_upload(file.filename, doc_id)
+        with destination.open("wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+    except Exception as exc:
+        storage.delete_document(doc_id)
+        return JSONResponse({"error": f"Failed to save upload: {exc}"}, status_code=400)
 
     background_tasks.add_task(
         ingest_file,
@@ -289,7 +323,17 @@ def delete_all_documents() -> JSONResponse:
 @app.post("/api/chat")
 def chat(request: ChatRequest) -> JSONResponse:
     top_k = request.top_k or config.TOP_K
-    response = app.state.chat_service.answer(request.message, doc_ids=request.doc_ids, top_k=top_k)
+    scoped_doc_ids = request.doc_ids
+    if request.doc_ids is not None:
+        scoped_doc_ids, scope_error = _validate_doc_scope(request.doc_ids)
+        if scope_error:
+            return JSONResponse({"error": scope_error}, status_code=400)
+    response = app.state.chat_service.answer(
+        request.message,
+        doc_ids=scoped_doc_ids,
+        top_k=top_k,
+        include_document_summaries=bool(request.include_document_summaries),
+    )
     return JSONResponse(response)
 
 
