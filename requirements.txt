@@ -1,0 +1,17 @@
+fastapi==0.115.8
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9
+pydantic==2.8.2
+python-dotenv==1.0.1
+numpy==1.26.4
+pillow==10.4.0
+pymupdf==1.24.9
+python-pptx==0.6.23
+python-docx==1.1.2
+openpyxl==3.1.5
+xlrd==2.0.1
+beautifulsoup4==4.12.3
+striprtf==0.0.26
+sentence-transformers==3.0.1
+openai>=1.54.0
+gdown>=5.2.0

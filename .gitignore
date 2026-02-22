@@ -1,0 +1,67 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*api key*.txt
+
+# Project runtime data (uploads, processed artifacts, local DB/index)
+data/
+
+# Large local datasets / media dumps
+spdocvqa_images/
+spdocvqa_images.tar.gz
+
+# Local scratch docs/images used during development
+*.pdf
+*.doc
+*.docx
+*.ppt
+*.pptx
+*.xls
+*.xlsx
+*.xlsm
+*.xltx
+*.xltm
+*.odt
+*.ods
+*.odp
+*.jpg
+*.jpeg
+*.png
+*.tiff
+*.bmp
+*.gif
+*.webp
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+
+# Logs and local editor/OS files
+*.log
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
