@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import List
+from typing import Any, Dict, List
 
 from .extractors import (
     extract_docx,
@@ -15,6 +16,8 @@ from .extractors import (
     extract_xls,
     extract_xlsx,
 )
+from .diagram_parser import parse_image_diagram
+from .ocr import extract_text_from_image
 from .text_chunker import chunk_text
 from .. import config, storage
 
@@ -42,15 +45,45 @@ def ingest_file(
     sparse_index=None,
     vlm=None,
 ) -> None:
-    storage.update_document(doc_id, status="processing")
-    document = storage.get_document(doc_id) or {}
-    doc_filename = str(document.get("filename") or file_path.name)
-    processed_image_dir = config.PROCESSED_DIR / doc_id / "images"
-    processed_image_dir.mkdir(parents=True, exist_ok=True)
+    progress_pct = 0
 
-    suffix = file_path.suffix.lower()
-    blocks = []
+    def _set_progress(
+        value: int,
+        stage: str,
+        message: str,
+        *,
+        status: str | None = None,
+        num_pages: int | None = None,
+        extra_metadata: Dict[str, Any] | None = None,
+    ) -> None:
+        nonlocal progress_pct
+        progress_pct = max(0, min(100, int(value)))
+        payload: Dict[str, Any] = {
+            "ingest_progress": progress_pct,
+            "ingest_stage": str(stage or "").strip() or "processing",
+            "ingest_message": str(message or "").strip(),
+            "ingest_updated_at": datetime.utcnow().isoformat(),
+        }
+        if isinstance(extra_metadata, dict):
+            payload.update(extra_metadata)
+        storage.update_document(
+            doc_id,
+            status=status,
+            num_pages=num_pages,
+            metadata=payload,
+        )
+
+    _set_progress(2, "processing", "Preparing document ingestion", status="processing")
+
     try:
+        document = storage.get_document(doc_id) or {}
+        doc_filename = str(document.get("filename") or file_path.name)
+        processed_image_dir = config.PROCESSED_DIR / doc_id / "images"
+        processed_image_dir.mkdir(parents=True, exist_ok=True)
+
+        _set_progress(8, "processing", "Extracting document content")
+        suffix = file_path.suffix.lower()
+        blocks = []
         if suffix in {".pdf"}:
             blocks = extract_pdf(file_path)
         elif suffix in {".pptx"}:
@@ -68,85 +101,319 @@ def ingest_file(
             blocks = extract_text(file_path)
         else:
             blocks = extract_generic(file_path)
-    except Exception:
-        storage.update_document(doc_id, status="failed")
-        raise
+        total_blocks = len(blocks)
+        _set_progress(14, "processing", f"Extracted {total_blocks} content block(s)")
 
-    chunks: List[dict] = []
-    image_counter = 0
-    for block in blocks:
-        metadata = {"doc_filename": doc_filename}
-        block_metadata = block.get("metadata")
-        if isinstance(block_metadata, dict):
-            metadata.update(block_metadata)
-        
-        text = str(block.get("text", ""))
+        chunks: List[dict] = []
+        page_image_paths: dict[int, str] = {}
+        graph_records: List[Dict[str, Any]] = []
+        diagram_aux_chunks: List[dict] = []
+        image_counter = 0
 
-        if block.get("type") == "image":
-            image = block.get("image")
-            image_path = None
-            if image is not None:
-                image_counter += 1
-                page_num = block.get("page") or 1
-                image_name = f"p{page_num}_img{image_counter}.png"
-                target = processed_image_dir / image_name
-                try:
-                    image.save(target, format="PNG")
-                    image_path = str(target)
-                    metadata["image_path"] = image_path
-                    if config.ENABLE_AI_INGEST_SUMMARIES and vlm is not None and hasattr(vlm, "answer_image_question"):
-                        prompt = (
-                            "Describe this page in high detail. Extract all textual content, describe any "
-                            "tables row by row, and explain any flowcharts, diagrams or logic presented."
-                        )
-                        try:
-                            desc = vlm.answer_image_question(image, prompt)
-                            text += f"\n[AI Visual Summary]: {desc}\n"
-                        except Exception as e:
-                            print(f"[Ingestion] Failed to get vision summary for {image_name}: {e}")
-                except Exception as e:
-                    print(f"Error saving image: {e}")
-
-        # Basic text embedding of whatever text/tables/summaries we generated.
-        if text.strip():
-            for idx, chunk in enumerate(chunk_text(text, max_chars=900, overlap=120)):
-                chunks.append(
+        def _append_aux_chunks(
+            content: str,
+            source: str,
+            page: int,
+            base_metadata: Dict[str, Any],
+            extra_metadata: Dict[str, Any] | None = None,
+        ) -> None:
+            payload = str(content or "").strip()
+            if not payload:
+                return
+            merged_metadata = dict(base_metadata)
+            if isinstance(extra_metadata, dict):
+                merged_metadata.update(extra_metadata)
+            for idx, piece in enumerate(chunk_text(payload, max_chars=900, overlap=120)):
+                diagram_aux_chunks.append(
                     {
                         "id": str(uuid.uuid4()),
                         "doc_id": doc_id,
-                        "page": block.get("page"),
+                        "page": int(page or 1),
                         "chunk_index": idx,
-                        "content": chunk,
-                        "source_type": str(block.get("type", "text")),
-                        "metadata": metadata,
+                        "content": piece,
+                        "source_type": source,
+                        "metadata": merged_metadata,
                     }
                 )
 
-    if chunks:
-        storage.add_chunks(chunks)
-        texts = [chunk["content"] for chunk in chunks]
-        vectors = embedder.embed_texts(texts)
-        dim = vectors.shape[1]
-        storage.add_embeddings(
-            (chunk["id"], vec.astype("float32").tobytes(), dim)
-            for chunk, vec in zip(chunks, vectors)
-        )
-        vector_index.add(vectors, [chunk["id"] for chunk in chunks])
-        if sparse_index is not None:
-            sparse_index.add_chunks(chunks)
+        progress_step = max(1, total_blocks // 20) if total_blocks else 1
+        for block_index, block in enumerate(blocks):
+            if block_index == 0 or (block_index + 1) % progress_step == 0 or (block_index + 1) == total_blocks:
+                loop_progress = 15 + int(((block_index + 1) / max(1, total_blocks)) * 55)
+                _set_progress(
+                    loop_progress,
+                    "processing",
+                    f"Processing content block {block_index + 1}/{max(1, total_blocks)}",
+                )
 
-    max_page = max((block.get("page") or 0 for block in blocks), default=0)
-    storage.update_document(doc_id, status="ready", num_pages=max_page)
+            metadata = {"doc_filename": doc_filename}
+            block_metadata = block.get("metadata")
+            if isinstance(block_metadata, dict):
+                metadata.update(block_metadata)
+
+            text = str(block.get("text", ""))
+            source_type = str(block.get("type", "text"))
+            graph_payload = block.get("graph")
+            parser_version = str(block.get("parser_version") or "").strip()
+            if isinstance(graph_payload, dict):
+                page_num = int(block.get("page") or 1)
+                graph_metadata = {
+                    "doc_filename": doc_filename,
+                    "graph_scope": metadata.get("graph_scope"),
+                    "graph_kind": metadata.get("graph_kind"),
+                    "slide_index": metadata.get("slide_index") or page_num,
+                }
+                graph_records.append(
+                    {
+                        "page": page_num,
+                        "graph": graph_payload,
+                        "parser_version": parser_version or "pptx-graph-v1",
+                        "confidence": 1.0,
+                        "metadata": graph_metadata,
+                    }
+                )
+
+            if block.get("type") == "image":
+                image = block.get("image")
+                image_path = None
+                if image is not None:
+                    image_counter += 1
+                    page_num = block.get("page") or 1
+                    image_name = f"p{page_num}_img{image_counter}.png"
+                    target = processed_image_dir / image_name
+                    try:
+                        image.save(target, format="PNG")
+                        image_path = str(target)
+                        metadata["image_path"] = image_path
+                        is_slide_render = str(metadata.get("image_kind") or "").strip().lower() == "slide_render"
+                        if is_slide_render or int(page_num) not in page_image_paths:
+                            page_image_paths[int(page_num)] = image_path
+                        should_run_ocr = bool(metadata.get("ocr_fallback_required", True))
+                        if should_run_ocr:
+                            ocr_result = extract_text_from_image(image)
+                            metadata["ocr_status"] = ocr_result.get("status")
+                            metadata["ocr_engine"] = ocr_result.get("engine")
+                            ocr_error = str(ocr_result.get("error") or "").strip()
+                            if ocr_error:
+                                metadata["ocr_error"] = ocr_error
+                            ocr_text = str(ocr_result.get("text") or "").strip()
+                            if ocr_text:
+                                metadata["ocr_confidence"] = ocr_result.get("avg_confidence", 0.0)
+                                metadata["ocr_line_count"] = ocr_result.get("line_count", 0)
+                                text = f"{text}\n\n{ocr_text}".strip() if text.strip() else ocr_text
+                                source_type = "ocr"
+                        if config.ENABLE_AI_INGEST_SUMMARIES and vlm is not None and hasattr(vlm, "answer_image_question"):
+                            prompt = (
+                                "Describe this page in high detail. Extract all textual content, describe any "
+                                "tables row by row, and explain any flowcharts, diagrams or logic presented."
+                            )
+                            try:
+                                desc = vlm.answer_image_question(image, prompt)
+                                summary_text = str(desc or "").strip()
+                                if summary_text:
+                                    text = f"{text}\n\n[AI Visual Summary]\n{summary_text}".strip() if text.strip() else summary_text
+                            except Exception as e:
+                                print(f"[Ingestion] Failed to get vision summary for {image_name}: {e}")
+
+                        diagram_result = parse_image_diagram(
+                            image,
+                            page=int(page_num),
+                            image_path=image_path or "",
+                        )
+                        diagram_status = str(diagram_result.get("status") or "").strip()
+                        if diagram_status:
+                            metadata["diagram_status"] = diagram_status
+                        diagram_error = str(diagram_result.get("error") or "").strip()
+                        if diagram_error:
+                            metadata["diagram_error"] = diagram_error
+
+                        if diagram_status == "ok":
+                            parser_version_value = str(diagram_result.get("parser_version") or "diagram-v1")
+                            confidence_value = float(diagram_result.get("confidence") or 0.0)
+                            graph_payload = diagram_result.get("graph")
+                            if isinstance(graph_payload, dict) and graph_payload:
+                                graph_records.append(
+                                    {
+                                        "page": int(page_num),
+                                        "graph": graph_payload,
+                                        "parser_version": parser_version_value,
+                                        "confidence": confidence_value,
+                                        "metadata": {
+                                            "doc_filename": doc_filename,
+                                            "graph_scope": "image",
+                                            "graph_kind": "image_diagram_graph",
+                                            "slide_index": int(page_num),
+                                            "parser": parser_version_value,
+                                        },
+                                    }
+                                )
+                            _append_aux_chunks(
+                                str(diagram_result.get("summary_text") or ""),
+                                "diagram_graph",
+                                int(page_num),
+                                metadata,
+                                {
+                                    "diagram_parser_version": parser_version_value,
+                                    "diagram_confidence": confidence_value,
+                                },
+                            )
+                            node_chunks = diagram_result.get("node_chunks")
+                            if isinstance(node_chunks, list):
+                                for node_text in node_chunks[: max(0, int(config.DIAGRAM_MAX_NODE_CHUNKS))]:
+                                    _append_aux_chunks(
+                                        str(node_text or ""),
+                                        "diagram_node",
+                                        int(page_num),
+                                        metadata,
+                                        {
+                                            "diagram_parser_version": parser_version_value,
+                                            "diagram_confidence": confidence_value,
+                                        },
+                                    )
+                            edge_chunks = diagram_result.get("edge_chunks")
+                            if isinstance(edge_chunks, list):
+                                for edge_text in edge_chunks[: max(0, int(config.DIAGRAM_MAX_EDGE_CHUNKS))]:
+                                    _append_aux_chunks(
+                                        str(edge_text or ""),
+                                        "diagram_edge",
+                                        int(page_num),
+                                        metadata,
+                                        {
+                                            "diagram_parser_version": parser_version_value,
+                                            "diagram_confidence": confidence_value,
+                                        },
+                                    )
+                    except Exception as e:
+                        print(f"Error saving image: {e}")
+                if not text.strip():
+                    page_num = block.get("page") or 1
+                    native_text_chars = int(metadata.get("native_text_chars") or 0)
+                    if native_text_chars <= 0:
+                        text = f"[Image page {page_num}]"
+                        metadata["image_only"] = True
+
+            # Basic text embedding of whatever text/tables/summaries we generated.
+            if text.strip():
+                for idx, chunk in enumerate(chunk_text(text, max_chars=900, overlap=120)):
+                    chunks.append(
+                        {
+                            "id": str(uuid.uuid4()),
+                            "doc_id": doc_id,
+                            "page": block.get("page"),
+                            "chunk_index": idx,
+                            "content": chunk,
+                            "source_type": source_type,
+                            "metadata": metadata,
+                        }
+                    )
+
+        _set_progress(72, "processing", "Finalizing extracted chunks")
+        if diagram_aux_chunks:
+            chunks.extend(diagram_aux_chunks)
+
+        for chunk in chunks:
+            page = chunk.get("page")
+            try:
+                page_num = int(page) if page is not None else 0
+            except Exception:
+                page_num = 0
+            if page_num <= 0:
+                continue
+            chunk_metadata = chunk.get("metadata")
+            if not isinstance(chunk_metadata, dict):
+                continue
+            if chunk_metadata.get("image_path"):
+                continue
+            page_image_path = page_image_paths.get(page_num)
+            if page_image_path:
+                chunk_metadata["image_path"] = page_image_path
+
+        if graph_records:
+            _set_progress(78, "processing", "Persisting diagram relationships")
+            created_at = datetime.utcnow().isoformat()
+            seen_graph_hashes: set[str] = set()
+            for record in graph_records:
+                page_num = int(record.get("page") or 1)
+                graph_payload = record.get("graph")
+                if not isinstance(graph_payload, dict):
+                    continue
+                parser_version = str(record.get("parser_version") or "pptx-graph-v1")
+                try:
+                    graph_fingerprint = json.dumps(graph_payload, sort_keys=True, ensure_ascii=True)
+                except Exception:
+                    graph_fingerprint = str(graph_payload)
+                dedupe_key = f"{page_num}:{parser_version}:{graph_fingerprint[:4000]}"
+                if dedupe_key in seen_graph_hashes:
+                    continue
+                seen_graph_hashes.add(dedupe_key)
+                image_path = str(page_image_paths.get(page_num) or "")
+                metadata = record.get("metadata")
+                safe_metadata = metadata if isinstance(metadata, dict) else {}
+                storage.add_diagram_graph(
+                    graph_id=str(uuid.uuid4()),
+                    doc_id=doc_id,
+                    page=page_num,
+                    image_path=image_path,
+                    parser_version=parser_version,
+                    graph=graph_payload,
+                    confidence=float(record.get("confidence") or 1.0),
+                    created_at=created_at,
+                    metadata=safe_metadata,
+                )
+
+        if chunks:
+            _set_progress(84, "processing", f"Embedding {len(chunks)} chunk(s)")
+            storage.add_chunks(chunks)
+            texts = [chunk["content"] for chunk in chunks]
+            vectors = embedder.embed_texts(texts)
+            dim = vectors.shape[1]
+            storage.add_embeddings(
+                (chunk["id"], vec.astype("float32").tobytes(), dim)
+                for chunk, vec in zip(chunks, vectors)
+            )
+            _set_progress(95, "processing", "Updating retrieval indexes")
+            vector_index.add(vectors, [chunk["id"] for chunk in chunks])
+            if sparse_index is not None:
+                sparse_index.add_chunks(chunks)
+
+        max_page = max((block.get("page") or 0 for block in blocks), default=0)
+        _set_progress(
+            100,
+            "ready",
+            "Ingestion complete",
+            status="ready",
+            num_pages=max_page,
+            extra_metadata={
+                "ingest_block_count": total_blocks,
+                "ingest_chunk_count": len(chunks),
+                "ingest_error": None,
+            },
+        )
+    except Exception as exc:
+        _set_progress(
+            progress_pct,
+            "failed",
+            "Ingestion failed",
+            status="failed",
+            extra_metadata={"ingest_error": str(exc)[:800]},
+        )
+        raise
 
 
 def create_document_record(filename: str) -> str:
     doc_id = str(uuid.uuid4())
+    created_at = datetime.utcnow().isoformat()
     storage.add_document(
         doc_id=doc_id,
         filename=filename,
         status="queued",
-        created_at=datetime.utcnow().isoformat(),
-        metadata={},
+        created_at=created_at,
+        metadata={
+            "ingest_progress": 0,
+            "ingest_stage": "queued",
+            "ingest_message": "Queued for ingestion",
+            "ingest_updated_at": created_at,
+        },
     )
     return doc_id
 

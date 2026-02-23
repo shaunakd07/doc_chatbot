@@ -14,9 +14,58 @@ const scopeSummary = document.getElementById("scopeSummary");
 let docsCache = [];
 let selectedDocIds = new Set();
 let scopeMode = "all";
+let docsPollingTimer = null;
 
 function isDocReady(doc) {
   return String(doc.status || "").toLowerCase() === "ready";
+}
+
+function getDocMetadata(doc) {
+  const meta = doc && typeof doc.metadata === "object" ? doc.metadata : {};
+  return meta && !Array.isArray(meta) ? meta : {};
+}
+
+function clampPercent(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(100, Math.round(n)));
+}
+
+function getDocProgress(doc) {
+  const metadata = getDocMetadata(doc);
+  if (metadata.ingest_progress != null) {
+    return clampPercent(metadata.ingest_progress);
+  }
+  const status = String(doc.status || "").toLowerCase();
+  if (status === "ready") return 100;
+  if (status === "processing") return 35;
+  return 0;
+}
+
+function getDocStatusLabel(doc) {
+  const ready = isDocReady(doc);
+  return `${doc.status}${ready ? "" : " (not selectable yet)"}`;
+}
+
+function shouldPollDocs(docs) {
+  return (docs || []).some((doc) => {
+    const status = String(doc.status || "").toLowerCase();
+    return status === "queued" || status === "processing";
+  });
+}
+
+function syncDocsPolling() {
+  const needsPolling = shouldPollDocs(docsCache);
+  if (needsPolling && !docsPollingTimer) {
+    docsPollingTimer = setInterval(() => {
+      fetchDocs().catch((err) => console.error("Doc polling failed", err));
+    }, 1500);
+    return;
+  }
+  if (!needsPolling && docsPollingTimer) {
+    clearInterval(docsPollingTimer);
+    docsPollingTimer = null;
+  }
 }
 
 function getReadyDocIds(docs) {
@@ -61,6 +110,9 @@ function renderDocs(docs) {
   docs.forEach((doc) => {
     const ready = isDocReady(doc);
     const checked = ready && selectedDocIds.has(doc.id);
+    const progressPct = getDocProgress(doc);
+    const statusLower = String(doc.status || "").toLowerCase();
+    const statusLabel = getDocStatusLabel(doc);
     const li = document.createElement("li");
     li.className = "doc-item";
     li.innerHTML = `
@@ -70,7 +122,13 @@ function renderDocs(docs) {
         </label>
         <div class="doc-main">
           <strong>${doc.filename}</strong>
-          <span>${doc.status}${ready ? "" : " (not selectable yet)"}</span>
+          <span>${statusLabel}</span>
+          <div class="doc-progress-wrap">
+            <div class="doc-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progressPct}">
+              <div class="doc-progress-fill ${statusLower}" style="width: ${progressPct}%"></div>
+            </div>
+            <span class="doc-progress-percent">${progressPct}%</span>
+          </div>
         </div>
       </div>
       <button class="delete-btn" data-doc-id="${doc.id}" type="button">Delete</button>
@@ -86,6 +144,7 @@ async function fetchDocs() {
   docsCache = data.documents || [];
   syncSelectionToDocs(docsCache);
   renderDocs(docsCache);
+  syncDocsPolling();
 }
 
 function addMessage(text, role = "assistant") {

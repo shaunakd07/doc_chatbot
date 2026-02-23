@@ -176,6 +176,7 @@ def health() -> JSONResponse:
             "model_provider": config.MODEL_PROVIDER,
             "embed_provider": config.EMBED_PROVIDER,
             "router_provider": config.ROUTER_PROVIDER,
+            "db_backend": config.DB_BACKEND,
             "router_enabled": True,
             "router_model_id": config.OPENAI_ROUTER_MODEL,
             "openai_chat_model": config.OPENAI_CHAT_MODEL,
@@ -184,6 +185,8 @@ def health() -> JSONResponse:
             "retrieval_mode": config.RETRIEVAL_MODE,
             "reranker_enabled": config.ENABLE_RERANKER,
             "reranker_model_id": config.RERANK_MODEL_ID if config.ENABLE_RERANKER else None,
+            "diagram_pipeline_enabled": config.ENABLE_DIAGRAM_PIPELINE,
+            "yolo_diagram_enabled": config.ENABLE_YOLO_DIAGRAM_DETECTOR,
             "cuda_available": torch.cuda.is_available(),
             "cuda_device_count": torch.cuda.device_count(),
             "last_generation_error": getattr(chat_service, "last_generation_error", None),
@@ -210,6 +213,15 @@ def get_document(doc_id: str) -> JSONResponse:
     if not doc:
         return JSONResponse({"error": "not found"}, status_code=404)
     return JSONResponse(doc)
+
+
+@app.get("/api/documents/{doc_id}/diagram-graphs")
+def get_document_diagram_graphs(doc_id: str) -> JSONResponse:
+    doc = storage.get_document(doc_id)
+    if not doc:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    graphs = storage.list_diagram_graphs(doc_ids=[doc_id])
+    return JSONResponse({"doc_id": doc_id, "graphs": graphs})
 
 
 @app.post("/api/documents")

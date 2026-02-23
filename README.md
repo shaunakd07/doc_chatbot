@@ -23,6 +23,24 @@ python -m backend.app
 
 Open: http://127.0.0.1:8000
 
+## PostgreSQL + pgvector (recommended)
+1) Set DB config in `.env`:
+```powershell
+DB_BACKEND=postgres
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/doc_chatbot
+PGVECTOR_DIM=1536
+```
+
+2) Start backend once to initialize schema (`CREATE EXTENSION vector` + tables):
+```powershell
+python -m backend.app
+```
+
+3) Optional: migrate existing SQLite data:
+```powershell
+python scripts/migrate_sqlite_to_postgres.py --database-url postgresql://postgres:postgres@localhost:5432/doc_chatbot --pgvector-dim 1536
+```
+
 ## Where to upload documents
 - Web UI: http://127.0.0.1:8000 (upload form)
 - Or drop files into: `D:/shaun/projects/doc_chatbot/data/uploads`
@@ -102,20 +120,70 @@ python scripts/evaluate_retrieval.py --eval-set data/eval/retrieval_eval_sample.
   - `GET /api/documents/{doc_id}/diagram-graphs`
 - Optional `.env` controls:
   - `ENABLE_DIAGRAM_PIPELINE=true`
+  - `ENABLE_YOLO_DIAGRAM_DETECTOR=true`
+  - `YOLO_MODEL=yolo26n.pt`
+  - `YOLO_DEVICE=auto`
+  - `YOLO_CONF_THRESHOLD=0.25`
+  - `YOLO_IOU_THRESHOLD=0.45`
+  - `YOLO_IMAGE_SIZE=960`
+  - `DIAGRAM_MIN_NODE_AREA=1600`
+  - `DIAGRAM_MIN_EDGE_LENGTH=48`
+  - `DIAGRAM_MAX_NODES=80`
+  - `DIAGRAM_MAX_EDGES=180`
   - `DIAGRAM_MAX_NODE_CHUNKS=24`
   - `DIAGRAM_MAX_EDGE_CHUNKS=24`
+  - `DIAGRAM_TOP_K_FLOOR=14`
+  - `DIAGRAM_PER_DOC_LIMIT_FLOOR=4`
+  - `DIAGRAM_MIN_EVIDENCE_SOURCE_TYPES=3`
+  - `DIAGRAM_MIN_GRAPH_CHUNKS=1`
+  - `DIAGRAM_MIN_OCR_CHUNKS=2`
+  - `DIAGRAM_MIN_NODE_CHUNKS=2`
+  - `DIAGRAM_MIN_EDGE_CHUNKS=2`
+  - `DIAGRAM_MIN_SLIDE_GRAPH_CHUNKS=0`
+  - `DIAGRAM_MIXED_EVIDENCE_LIMIT=72`
 
 ## OCR tuning
-- OCR preprocessing now includes upscaling, contrast normalization, sharpening, denoising, and region-based OCR passes.
+- PDF ingestion now follows a hybrid path:
+  - native PDF text extraction first
+  - PaddleOCR fallback for low-text/image-only pages
+  - page images are always saved for multimodal follow-up
+- PaddleOCR now runs in an isolated worker process to avoid DLL/runtime conflicts with YOLO/PyTorch in the main API process.
+- PPTX ingestion now follows a hybrid path:
+  - OOXML shape parsing (text, tables, embedded images, geometry)
+  - inferred relationship graph per slide + document-level slide links
+  - full-slide rendering through LibreOffice->PDF->image for OCR/layout fallback
 - Optional `.env` controls:
-  - `OCR_TESSERACT_OEM` (default `3`)
-  - `OCR_TESSERACT_PSM` (default `6`)
-  - `OCR_REGION_GRID` (default `2`)
-  - `OCR_UPSCALE` (default `2.0`)
+  - `ENABLE_PADDLE_OCR` (default `true`)
+  - `PADDLE_OCR_LANG` (default `en`)
+  - `PADDLE_OCR_USE_GPU` (default `false`)
+  - `PADDLE_OCR_MIN_CONFIDENCE` (default `0.50`)
+  - `PADDLE_OCR_MAX_RETRIES` (default `1`)
+  - `OCR_WORKER_TIMEOUT_SEC` (default `60`)
+  - `OCR_WORKER_STARTUP_TIMEOUT_SEC` (default `120`)
+  - `OCR_NATIVE_TEXT_MIN_CHARS` (default `1`)
+  - `PDF_RENDER_DPI` (default `220`)
+  - `ENABLE_PPTX_SLIDE_RENDER` (default `true`)
+  - `ENABLE_PPTX_RELATIONSHIP_GRAPH` (default `true`)
+  - `PPTX_GRAPH_MAX_EDGES` (default `120`)
 
 ## Notes for scanned PDFs
-- OCR uses Tesseract. Install it and set `TESSERACT_CMD` in `.env` if it is not on PATH.
+- OCR uses PaddleOCR at ingestion time.
+- Install dependencies with `pip install -r requirements.txt`.
 - For best OCR results, use 200-300 DPI scans.
+
+## Notes for PPTX rendering
+- Full-slide PPTX rendering uses LibreOffice (`soffice`) if available on PATH.
+- If LibreOffice is unavailable, PPTX ingestion still works via OOXML shape extraction.
+
+## Optional YOLO tuning
+- Base install (`requirements.txt`) includes OpenCV + NetworkX + Ultralytics YOLO for diagram parsing.
+- Default model is `yolo26n.pt` (smallest/fastest family tier).
+- To use a different checkpoint, set:
+  - `YOLO_MODEL=<model-name-or-path>`
+  - `YOLO_DEVICE=auto|cpu|cuda:0`
+  - `YOLO_CONF_THRESHOLD=0.25`
+  - `YOLO_IOU_THRESHOLD=0.45`
+  - `YOLO_IMAGE_SIZE=960`
 
 ## Models
 - Multimodal: `OpenGVLab/InternVL2_5-2B`

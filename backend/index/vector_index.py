@@ -4,15 +4,21 @@ from typing import List, Tuple
 
 import numpy as np
 
-from .. import storage
+from .. import config, storage
 
 
 class VectorIndex:
     def __init__(self) -> None:
         self.chunk_ids: List[str] = []
         self.embeddings = np.zeros((0, 1), dtype="float32")
+        self._use_db_search = str(config.DB_BACKEND).strip().lower() == "postgres"
 
     def load(self) -> None:
+        if self._use_db_search:
+            # pgvector search runs directly against PostgreSQL; no in-memory matrix preload needed.
+            self.chunk_ids = []
+            self.embeddings = np.zeros((0, 1), dtype="float32")
+            return
         records = storage.load_embeddings()
         if not records:
             self.chunk_ids = []
@@ -31,6 +37,9 @@ class VectorIndex:
         self.embeddings = np.vstack(vectors).astype("float32")
 
     def add(self, vectors: np.ndarray, chunk_ids: List[str]) -> None:
+        if self._use_db_search:
+            # Vectors are already persisted to PostgreSQL in storage.add_embeddings().
+            return
         if vectors.size == 0:
             return
         if self.embeddings.size == 0:
@@ -40,6 +49,8 @@ class VectorIndex:
         self.chunk_ids.extend(chunk_ids)
 
     def search(self, query_vector: np.ndarray, top_k: int = 5) -> List[Tuple[str, float]]:
+        if self._use_db_search:
+            return storage.search_embeddings(query_vector, top_k=top_k)
         if self.embeddings.size == 0:
             return []
         query = query_vector.astype("float32")

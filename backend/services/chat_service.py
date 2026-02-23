@@ -4,7 +4,6 @@ import logging
 import re
 import traceback
 from collections import defaultdict
-from pathlib import Path
 from typing import Any, List, Optional
 
 from .. import config, storage
@@ -45,10 +44,18 @@ class ChatService:
         if intent not in {"compare", "qa"}:
             intent = "qa"
         image_intent = bool(route.get("needs_image_reasoning", False)) or route.get("task_type") == "image_qa"
+        relationship_intent = self._is_relationship_intent(question)
+        diagram_intent = image_intent or relationship_intent
         retrieval_plan = route.get("retrieval_plan") if isinstance(route.get("retrieval_plan"), dict) else {}
         route_top_k = int(retrieval_plan.get("top_k", max(top_k, 8)))
         per_doc_limit = int(retrieval_plan.get("per_doc_limit", 4))
+        if diagram_intent:
+            route_top_k = max(route_top_k, int(config.DIAGRAM_TOP_K_FLOOR))
+            per_doc_limit = max(per_doc_limit, int(config.DIAGRAM_PER_DOC_LIMIT_FLOOR))
         retrieval_mode = str(retrieval_plan.get("strategy", "semantic")).strip().lower() or "semantic"
+        if isinstance(route.get("retrieval_plan"), dict):
+            route["retrieval_plan"]["top_k"] = route_top_k
+            route["retrieval_plan"]["per_doc_limit"] = per_doc_limit
 
         if intent == "compare":
             chunks = self._retrieve_for_comparison(
@@ -65,12 +72,37 @@ class ChatService:
                     doc_ids=doc_ids,
                     mode=retrieval_mode,
                 )
+            if relationship_intent:
+                chunks = self._augment_for_relationship_queries(
+                    question,
+                    chunks,
+                    doc_ids=doc_ids,
+                    mode=retrieval_mode,
+                )
         else:
             chunks = self.retrieval.search(question, top_k=route_top_k, doc_ids=doc_ids, mode=retrieval_mode)
             if image_intent:
                 chunks = self._augment_for_image_queries(question, chunks, doc_ids=doc_ids, mode=retrieval_mode)
+            if relationship_intent:
+                chunks = self._augment_for_relationship_queries(
+                    question,
+                    chunks,
+                    doc_ids=doc_ids,
+                    mode=retrieval_mode,
+                )
+
+        if diagram_intent:
+            chunks = self._ensure_diagram_evidence_mix(
+                question,
+                chunks,
+                doc_ids=doc_ids,
+                mode=retrieval_mode,
+                target_k=route_top_k,
+            )
 
         chunks = self._dedupe_redundant_chunks(chunks, limit=max(24, route_top_k * 4))
+        if diagram_intent:
+            chunks = self._prioritize_diagram_chunk_order(chunks)
         context_blocks = self._build_context_blocks(chunks)
         
         image_paths: List[str] = []
@@ -144,12 +176,7 @@ class ChatService:
             content = str(chunk.get("content", "")).strip()
             if not content:
                 continue
-            filename = chunk.get("doc_filename") or "unknown"
-            created_at = chunk.get("doc_created_at") or "unknown"
-            block = (
-                f"[source:{chunk['doc_id']}:{chunk.get('page','?')}:{chunk['id']}"
-                f"|file:{filename}|created:{created_at}] {content}"
-            )
+            block = f"{self._build_source_tag(chunk)} {content}"
             if blocks and total + len(block) > self.max_context_chars:
                 break
             blocks.append(block)
@@ -179,7 +206,7 @@ class ChatService:
             if not content:
                 continue
             snippet = content[:260].rstrip()
-            source = f"[source:{chunk['doc_id']}:{chunk.get('page','?')}:{chunk['id']}]"
+            source = self._build_source_tag(chunk)
             excerpts.append(f"- {snippet}... {source}")
 
         if not excerpts:
@@ -214,7 +241,7 @@ class ChatService:
                 text = " ".join(str(chunk.get("content", "")).split())
                 if not text:
                     continue
-                source = f"[source:{chunk['doc_id']}:{chunk.get('page','?')}:{chunk['id']}]"
+                source = self._build_source_tag(chunk)
                 lines.append(f"- {text[:210].rstrip()}... {source}")
             return "\n".join(lines)
 
@@ -301,6 +328,26 @@ class ChatService:
         }
         return any(marker in text for marker in markers)
 
+    def _is_relationship_intent(self, question: str) -> bool:
+        text = question.lower()
+        markers = {
+            "relationship",
+            "related",
+            "connected",
+            "connection",
+            "flow",
+            "sequence",
+            "dependency",
+            "dependencies",
+            "across slides",
+            "between slides",
+            "slide progression",
+            "transition",
+            "diagram",
+            "workflow",
+        }
+        return any(marker in text for marker in markers)
+
     def _augment_for_image_queries(
         self, question: str, chunks: List[dict], doc_ids: Optional[List[str]], mode: str = "hybrid"
     ) -> List[dict]:
@@ -318,6 +365,288 @@ class ChatService:
             mode=mode,
         )
         return self._merge_chunks(chunks + supplemental, limit=16)
+
+    def _augment_for_relationship_queries(
+        self, question: str, chunks: List[dict], doc_ids: Optional[List[str]], mode: str = "hybrid"
+    ) -> List[dict]:
+        if not self._is_relationship_intent(question):
+            return chunks
+        relationship_sources = {"slide_graph", "diagram_graph", "diagram_node", "diagram_edge"}
+        if any(str(chunk.get("source_type") or "").strip().lower() in relationship_sources for chunk in chunks):
+            return chunks
+        supplemental = self.retrieval.search(
+            f"{question} relationship connector flow sequence dependency slide graph",
+            top_k=14,
+            doc_ids=doc_ids,
+            mode=mode,
+        )
+        return self._merge_chunks(chunks + supplemental, limit=20)
+
+    def _source_type_counts(self, chunks: List[dict]) -> dict[str, int]:
+        counts: dict[str, int] = defaultdict(int)
+        for chunk in chunks:
+            source_type = str(chunk.get("source_type") or "").strip().lower()
+            if not source_type:
+                continue
+            counts[source_type] += 1
+        return counts
+
+    def _collect_companion_chunks(
+        self,
+        chunks: List[dict],
+        doc_ids: Optional[List[str]],
+        source_types: set[str],
+        limit: int,
+    ) -> List[dict]:
+        if not source_types or limit <= 0:
+            return []
+        source_types = {str(item).strip().lower() for item in source_types if str(item).strip()}
+        if not source_types:
+            return []
+
+        candidate_doc_ids: list[str] = []
+        seen_doc_ids: set[str] = set()
+        for doc_id in (doc_ids or []):
+            raw = str(doc_id or "").strip()
+            if raw and raw not in seen_doc_ids:
+                seen_doc_ids.add(raw)
+                candidate_doc_ids.append(raw)
+        if not candidate_doc_ids:
+            for chunk in chunks:
+                raw = str(chunk.get("doc_id") or "").strip()
+                if raw and raw not in seen_doc_ids:
+                    seen_doc_ids.add(raw)
+                    candidate_doc_ids.append(raw)
+                if len(candidate_doc_ids) >= 6:
+                    break
+        if not candidate_doc_ids:
+            return []
+
+        page_scope: set[tuple[str, int]] = set()
+        scope_sources = {"diagram_graph", "diagram_node", "diagram_edge", "slide_graph", "ocr", "image"}
+        for chunk in chunks:
+            source = str(chunk.get("source_type") or "").strip().lower()
+            if source not in scope_sources:
+                continue
+            raw_doc_id = str(chunk.get("doc_id") or "").strip()
+            if not raw_doc_id:
+                continue
+            try:
+                page_num = int(chunk.get("page") or 0)
+            except Exception:
+                page_num = 0
+            if page_num > 0:
+                page_scope.add((raw_doc_id, page_num))
+
+        highest_score = max((float(chunk.get("score") or 0.0) for chunk in chunks), default=0.0)
+        fallback_score = highest_score - 0.005
+        collected: List[dict] = []
+        for doc_id in candidate_doc_ids:
+            document = storage.get_document(doc_id) or {}
+            doc_chunks = storage.get_chunks_by_doc(doc_id)
+            for original in doc_chunks:
+                source = str(original.get("source_type") or "").strip().lower()
+                if source not in source_types:
+                    continue
+                try:
+                    page_num = int(original.get("page") or 0)
+                except Exception:
+                    page_num = 0
+                if page_scope and source != "slide_graph" and (doc_id, page_num) not in page_scope:
+                    continue
+                chunk = dict(original)
+                chunk["doc_filename"] = document.get("filename")
+                chunk["doc_created_at"] = document.get("created_at")
+                chunk["score"] = float(chunk.get("score") or fallback_score - (0.0001 * len(collected)))
+                collected.append(chunk)
+                if len(collected) >= limit:
+                    return collected
+        return collected
+
+    def _ensure_diagram_evidence_mix(
+        self,
+        question: str,
+        chunks: List[dict],
+        doc_ids: Optional[List[str]],
+        mode: str,
+        target_k: int,
+    ) -> List[dict]:
+        required_by_type = {
+            "diagram_graph": max(0, int(config.DIAGRAM_MIN_GRAPH_CHUNKS)),
+            "ocr": max(0, int(config.DIAGRAM_MIN_OCR_CHUNKS)),
+            "diagram_node": max(0, int(config.DIAGRAM_MIN_NODE_CHUNKS)),
+            "diagram_edge": max(0, int(config.DIAGRAM_MIN_EDGE_CHUNKS)),
+            "slide_graph": max(0, int(config.DIAGRAM_MIN_SLIDE_GRAPH_CHUNKS)),
+        }
+        merge_limit = max(
+            int(config.DIAGRAM_MIXED_EVIDENCE_LIMIT),
+            max(8, int(target_k)) * 4,
+        )
+        working = list(chunks)
+        working = self._merge_chunks(working, limit=merge_limit)
+        counts = self._source_type_counts(working)
+
+        missing_types = [source for source, required in required_by_type.items() if counts.get(source, 0) < required]
+        if missing_types:
+            companions = self._collect_companion_chunks(
+                working,
+                doc_ids=doc_ids,
+                source_types=set(missing_types),
+                limit=max(24, merge_limit // 2),
+            )
+            if companions:
+                working = self._merge_chunks(working + companions, limit=merge_limit)
+                counts = self._source_type_counts(working)
+                missing_types = [
+                    source for source, required in required_by_type.items() if counts.get(source, 0) < required
+                ]
+
+        if missing_types:
+            source_queries = {
+                "diagram_graph": f"{question} diagram summary key nodes relationships",
+                "ocr": f"{question} exact text labels boxes shapes written words",
+                "diagram_node": f"{question} diagram nodes labels regions boxes",
+                "diagram_edge": f"{question} diagram edges arrows flow direction connections",
+                "slide_graph": f"{question} slide relationship graph connectors",
+            }
+            extra: List[dict] = []
+            for source in missing_types:
+                required = required_by_type.get(source, 0)
+                if required <= 0:
+                    continue
+                candidates = self.retrieval.search(
+                    source_queries.get(source, question),
+                    top_k=max(8, required * 8),
+                    doc_ids=doc_ids,
+                    mode=mode,
+                )
+                filtered = [
+                    chunk
+                    for chunk in candidates
+                    if str(chunk.get("source_type") or "").strip().lower() == source
+                ]
+                if filtered:
+                    extra.extend(filtered[: max(required * 2, required + 1)])
+            if extra:
+                working = self._merge_chunks(working + extra, limit=merge_limit)
+                counts = self._source_type_counts(working)
+
+        essential_sources = {"diagram_graph", "ocr", "diagram_node", "diagram_edge", "slide_graph"}
+        present_sources = {
+            source
+            for source, count in counts.items()
+            if source in essential_sources and int(count) > 0
+        }
+        min_types = max(1, int(config.DIAGRAM_MIN_EVIDENCE_SOURCE_TYPES))
+        if len(present_sources) < min_types:
+            broad = self.retrieval.search(
+                f"{question} diagram ocr node edge relationship labels text",
+                top_k=max(int(config.DIAGRAM_TOP_K_FLOOR) * 2, 18),
+                doc_ids=doc_ids,
+                mode=mode,
+            )
+            prioritized = [
+                chunk
+                for chunk in broad
+                if str(chunk.get("source_type") or "").strip().lower() in essential_sources
+            ]
+            if prioritized:
+                working = self._merge_chunks(working + prioritized, limit=merge_limit)
+
+        final_target = max(int(target_k), int(config.DIAGRAM_TOP_K_FLOOR))
+        ordered = self._diversify_diagram_chunks(
+            working,
+            required_by_type=required_by_type,
+            limit=max(final_target, merge_limit),
+        )
+        return ordered
+
+    def _diversify_diagram_chunks(
+        self,
+        chunks: List[dict],
+        required_by_type: dict[str, int],
+        limit: int,
+    ) -> List[dict]:
+        if not chunks:
+            return []
+        limit = max(1, int(limit))
+        priority_order = ["diagram_graph", "ocr", "diagram_node", "slide_graph", "diagram_edge"]
+        prioritized: dict[str, List[dict]] = {source: [] for source in priority_order}
+        remainder: List[dict] = []
+
+        ranked = sorted(chunks, key=lambda c: float(c.get("score", 0.0)), reverse=True)
+        for chunk in ranked:
+            source = str(chunk.get("source_type") or "").strip().lower()
+            if source in prioritized:
+                prioritized[source].append(chunk)
+            else:
+                remainder.append(chunk)
+
+        selected: List[dict] = []
+        seen_ids: set[str] = set()
+
+        def add_chunk(chunk: dict) -> bool:
+            chunk_id = str(chunk.get("id") or "").strip()
+            if not chunk_id or chunk_id in seen_ids:
+                return False
+            seen_ids.add(chunk_id)
+            selected.append(chunk)
+            return True
+
+        for source in priority_order:
+            required = max(0, int(required_by_type.get(source, 0)))
+            if required <= 0:
+                continue
+            for chunk in prioritized.get(source, [])[:required]:
+                if len(selected) >= limit:
+                    return selected
+                add_chunk(chunk)
+
+        cursors = {source: 0 for source in priority_order}
+        while len(selected) < limit:
+            added_in_round = False
+            for source in priority_order:
+                bucket = prioritized.get(source, [])
+                cursor = int(cursors.get(source, 0))
+                while cursor < len(bucket):
+                    candidate = bucket[cursor]
+                    cursor += 1
+                    if add_chunk(candidate):
+                        added_in_round = True
+                        break
+                cursors[source] = cursor
+                if len(selected) >= limit:
+                    return selected
+            if not added_in_round:
+                break
+
+        for chunk in remainder:
+            if len(selected) >= limit:
+                break
+            add_chunk(chunk)
+
+        return selected
+
+    def _prioritize_diagram_chunk_order(self, chunks: List[dict]) -> List[dict]:
+        if not chunks:
+            return []
+        priority = {
+            "diagram_graph": 0,
+            "ocr": 1,
+            "diagram_node": 2,
+            "slide_graph": 3,
+            "image": 4,
+            "text": 5,
+            "table": 5,
+            "diagram_edge": 6,
+        }
+        return sorted(
+            chunks,
+            key=lambda chunk: (
+                priority.get(str(chunk.get("source_type") or "").strip().lower(), 5),
+                -float(chunk.get("score", 0.0)),
+            ),
+        )
 
     def _retrieve_for_comparison(
         self,
@@ -385,6 +714,13 @@ class ChatService:
     def _prepare_response_sources(self, chunks: List[dict], intent: str) -> List[dict]:
         max_total = 16 if intent == "compare" else 12
         per_doc_limit = 1 if intent == "compare" else 2
+        diagram_sources = {"diagram_graph", "ocr", "diagram_node", "diagram_edge", "slide_graph"}
+        has_diagram_sources = any(
+            str(chunk.get("source_type") or "").strip().lower() in diagram_sources for chunk in chunks
+        )
+        if intent != "compare" and has_diagram_sources:
+            max_total = max(max_total, 20)
+            per_doc_limit = max(per_doc_limit, 4)
         by_doc_count: dict[str, int] = defaultdict(int)
         seen_keys: set[tuple[str, str]] = set()
         compact: List[dict] = []
@@ -463,3 +799,23 @@ class ChatService:
         if cut_index > 0:
             raw = raw[:cut_index].rstrip()
         return raw
+
+    def _doc_label(self, filename: object, doc_id: object) -> str:
+        raw = str(filename or "").strip().replace("\\", "/")
+        base = raw.split("/")[-1] if raw else ""
+        if base:
+            stem = base.rsplit(".", 1)[0]
+            if stem:
+                return stem
+            return base
+        fallback = str(doc_id or "").strip()
+        return fallback or "unknown"
+
+    def _build_source_tag(self, chunk: dict) -> str:
+        doc_id = str(chunk.get("doc_id") or "").strip() or "unknown"
+        page = str(chunk.get("page") or "?").strip()
+        chunk_id = str(chunk.get("id") or "").strip() or "unknown"
+        doc_name = self._doc_label(chunk.get("doc_filename"), doc_id)
+        source_type = str(chunk.get("source_type") or "").strip()
+        source_suffix = f"|type:{source_type}" if source_type else ""
+        return f"[source:doc:{doc_name}|doc_id:{doc_id}|page:{page}|chunk:{chunk_id}{source_suffix}]"
