@@ -28,35 +28,52 @@ _WORKER_STDERR_THREAD: threading.Thread | None = None
 _WORKER_INIT_ERROR: str | None = None
 
 
+def _engine_label() -> str:
+    return "paddleocr" if str(config.OCR_ENGINE).strip().lower() == "paddle" else "tesseract"
+
+
 def _unavailable_response(error: str) -> Dict[str, object]:
+    engine = _engine_label()
     return {
         "text": "",
         "line_count": 0,
         "avg_confidence": 0.0,
-        "engine": "paddleocr",
+        "engine": engine,
         "status": "unavailable",
-        "error": str(error or "PaddleOCR worker unavailable"),
+        "error": str(error or f"{engine} worker unavailable"),
     }
 
 
 def _error_response(error: str) -> Dict[str, object]:
+    engine = _engine_label()
     return {
         "text": "",
         "line_count": 0,
         "avg_confidence": 0.0,
-        "engine": "paddleocr",
+        "engine": engine,
         "status": "error",
-        "error": str(error or "PaddleOCR worker failed"),
+        "error": str(error or f"{engine} worker failed"),
     }
 
 
 def _worker_env() -> Dict[str, str]:
     env = os.environ.copy()
-    env["ENABLE_PADDLE_OCR"] = "true" if config.ENABLE_PADDLE_OCR else "false"
+    env["OCR_ENGINE"] = str(config.OCR_ENGINE)
+    env["ENABLE_OCR"] = "true" if config.ENABLE_OCR else "false"
+    # Backward compatibility for older workers/configs.
+    env["ENABLE_PADDLE_OCR"] = "true" if config.ENABLE_OCR else "false"
     env["PADDLE_OCR_LANG"] = str(config.PADDLE_OCR_LANG)
     env["PADDLE_OCR_USE_GPU"] = "true" if config.PADDLE_OCR_USE_GPU else "false"
     env["PADDLE_OCR_MIN_CONFIDENCE"] = str(config.PADDLE_OCR_MIN_CONFIDENCE)
     env["PADDLE_OCR_MAX_RETRIES"] = str(config.PADDLE_OCR_MAX_RETRIES)
+    env["PADDLE_OCR_REINIT_ON_FAILURE"] = "true" if config.PADDLE_OCR_REINIT_ON_FAILURE else "false"
+    env["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = (
+        "True" if config.PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK else "False"
+    )
+    env["OCR_TESSERACT_CMD"] = str(config.OCR_TESSERACT_CMD)
+    env["OCR_TESSERACT_LANG"] = str(config.OCR_TESSERACT_LANG)
+    env["OCR_TESSERACT_OEM"] = str(config.OCR_TESSERACT_OEM)
+    env["OCR_TESSERACT_PSM"] = str(config.OCR_TESSERACT_PSM)
     return env
 
 
@@ -219,15 +236,19 @@ def _start_worker_locked() -> bool:
     try:
         health = _send_request_locked({"type": "health"}, startup_timeout)
     except Exception as exc:
-        _WORKER_INIT_ERROR = f"OCR worker health check failed: {exc}"
-        logger.warning("%s", _WORKER_INIT_ERROR)
+        init_error = f"OCR worker health check failed: {exc}"
+        _WORKER_INIT_ERROR = init_error
+        logger.warning("%s", init_error)
         _shutdown_worker_locked()
+        _WORKER_INIT_ERROR = init_error
         return False
 
     if str(health.get("status") or "") != "ok":
-        _WORKER_INIT_ERROR = str(health.get("error") or "OCR worker reported unavailable")
-        logger.warning("OCR worker unavailable: %s", _WORKER_INIT_ERROR)
+        init_error = str(health.get("error") or "OCR worker reported unavailable")
+        _WORKER_INIT_ERROR = init_error
+        logger.warning("OCR worker unavailable: %s", init_error)
         _shutdown_worker_locked()
+        _WORKER_INIT_ERROR = init_error
         return False
 
     _WORKER_INIT_ERROR = None
@@ -235,7 +256,7 @@ def _start_worker_locked() -> bool:
 
 
 def _ensure_worker_locked() -> bool:
-    if not config.ENABLE_PADDLE_OCR:
+    if not config.ENABLE_OCR:
         return False
 
     proc = _WORKER_PROCESS
@@ -248,13 +269,22 @@ def _ensure_worker_locked() -> bool:
 
 def extract_text_from_image(image: Image.Image) -> Dict[str, object]:
     """
-    Runs PaddleOCR in an isolated subprocess and returns normalized OCR output.
+    Runs OCR in an isolated subprocess and returns normalized OCR output.
     """
 
-    if not config.ENABLE_PADDLE_OCR:
-        return _unavailable_response("PaddleOCR is disabled")
+    if not config.ENABLE_OCR:
+        return _unavailable_response("OCR is disabled")
 
     rgb = image.convert("RGB")
+    max_side = max(0, int(config.OCR_MAX_IMAGE_SIDE))
+    if max_side > 0:
+        width, height = rgb.size
+        largest_side = max(width, height)
+        if largest_side > max_side:
+            scale = max_side / float(largest_side)
+            target_size = (max(1, int(width * scale)), max(1, int(height * scale)))
+            resample_lanczos = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
+            rgb = rgb.resize(target_size, resample=resample_lanczos)
     buf = io.BytesIO()
     rgb.save(buf, format="PNG")
     image_b64 = base64.b64encode(buf.getvalue()).decode("ascii")

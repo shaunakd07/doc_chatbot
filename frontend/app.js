@@ -10,11 +10,192 @@ const sendBtn = document.getElementById("sendBtn");
 const includeDocSummaries = document.getElementById("includeDocSummaries");
 const selectAllDocs = document.getElementById("selectAllDocs");
 const scopeSummary = document.getElementById("scopeSummary");
+const workspace = document.getElementById("workspace");
+const docsSidebar = document.getElementById("docsSidebar");
+const mainArea = document.getElementById("mainArea");
+const chatPane = document.getElementById("chatPane");
+const sidebarResizer = document.getElementById("sidebarResizer");
+const chatResizer = document.getElementById("chatResizer");
+const collapseSidebarBtn = document.getElementById("collapseSidebarBtn");
+const expandSidebarBtn = document.getElementById("expandSidebarBtn");
+const TRASH_ICON_SRC = "/icons/trash-can-icon-vector-13490171.avif";
 
 let docsCache = [];
 let selectedDocIds = new Set();
 let scopeMode = "all";
 let docsPollingTimer = null;
+
+const SIDEBAR_MIN = 240;
+const SIDEBAR_MAX = 640;
+const CHAT_MIN = 460;
+const UI_KEYS = {
+  sidebarWidth: "ui.sidebar.width",
+  sidebarCollapsed: "ui.sidebar.collapsed",
+  layoutVersion: "ui.layout.version",
+};
+const UI_LAYOUT_VERSION = "2";
+
+function getChatMinWidth(mainWidth) {
+  return Math.max(CHAT_MIN, Math.round(mainWidth * 0.6));
+}
+
+function clamp(value, min, max) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return min;
+  return Math.min(max, Math.max(min, n));
+}
+
+function getStoredNumber(key) {
+  const value = Number(window.localStorage.getItem(key));
+  return Number.isFinite(value) ? value : null;
+}
+
+function setSidebarCollapsed(collapsed) {
+  if (!workspace) return;
+  workspace.classList.toggle("sidebar-collapsed", !!collapsed);
+  if (collapseSidebarBtn) {
+    collapseSidebarBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    collapseSidebarBtn.textContent = collapsed ? "Expand" : "Collapse";
+  }
+  if (expandSidebarBtn) {
+    expandSidebarBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  }
+  window.localStorage.setItem(UI_KEYS.sidebarCollapsed, collapsed ? "1" : "0");
+}
+
+function applyInitialLayoutPrefs() {
+  if (!docsSidebar || !chatPane) return;
+
+  const savedLayoutVersion = window.localStorage.getItem(UI_KEYS.layoutVersion);
+  if (savedLayoutVersion !== UI_LAYOUT_VERSION) {
+    window.localStorage.setItem(UI_KEYS.layoutVersion, UI_LAYOUT_VERSION);
+  }
+
+  const sidebarWidthStored = getStoredNumber(UI_KEYS.sidebarWidth);
+  const sidebarWidth = clamp(sidebarWidthStored ?? 320, SIDEBAR_MIN, SIDEBAR_MAX);
+  docsSidebar.style.setProperty("--sidebar-width", `${sidebarWidth}px`);
+  docsSidebar.style.width = `${sidebarWidth}px`;
+
+  const initiallyCollapsed = window.localStorage.getItem(UI_KEYS.sidebarCollapsed) === "1";
+  setSidebarCollapsed(initiallyCollapsed);
+
+  chatPane.style.setProperty("--chat-width", "100%");
+  chatPane.style.width = "100%";
+}
+
+function installHorizontalResizer(handle, onMove, onEnd) {
+  if (!handle) return;
+  let dragState = null;
+
+  const stop = () => {
+    if (!dragState) return;
+    dragState = null;
+    document.body.classList.remove("resizing");
+    window.removeEventListener("mousemove", move);
+    window.removeEventListener("mouseup", stop);
+    if (typeof onEnd === "function") onEnd();
+  };
+
+  const move = (event) => {
+    if (!dragState) return;
+    onMove(event, dragState);
+  };
+
+  handle.addEventListener("mousedown", (event) => {
+    event.preventDefault();
+    dragState = {
+      startX: event.clientX,
+      sidebarWidth: docsSidebar ? docsSidebar.getBoundingClientRect().width : 0,
+      chatWidth: chatPane ? chatPane.getBoundingClientRect().width : 0,
+      mainWidth: mainArea ? mainArea.getBoundingClientRect().width : 0,
+    };
+    document.body.classList.add("resizing");
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", stop);
+  });
+}
+
+function setupLayoutInteractions() {
+  applyInitialLayoutPrefs();
+
+  if (collapseSidebarBtn) {
+    collapseSidebarBtn.addEventListener("click", () => {
+      const collapsed = workspace?.classList.contains("sidebar-collapsed");
+      setSidebarCollapsed(!collapsed);
+    });
+  }
+
+  if (expandSidebarBtn) {
+    expandSidebarBtn.addEventListener("click", () => setSidebarCollapsed(false));
+  }
+
+  installHorizontalResizer(
+    sidebarResizer,
+    (event, state) => {
+      if (!docsSidebar || !workspace || workspace.classList.contains("sidebar-collapsed")) return;
+      const next = clamp(state.sidebarWidth + (event.clientX - state.startX), SIDEBAR_MIN, SIDEBAR_MAX);
+      docsSidebar.style.setProperty("--sidebar-width", `${next}px`);
+      docsSidebar.style.width = `${next}px`;
+    },
+    () => {
+      if (!docsSidebar) return;
+      window.localStorage.setItem(UI_KEYS.sidebarWidth, `${Math.round(docsSidebar.getBoundingClientRect().width)}`);
+    }
+  );
+
+  installHorizontalResizer(
+    chatResizer,
+    (event, state) => {
+      if (!chatPane || !mainArea) return;
+      const minWidth = getChatMinWidth(state.mainWidth);
+      const maxWidth = Math.max(minWidth, state.mainWidth - 20);
+      const next = clamp(state.chatWidth + (event.clientX - state.startX), minWidth, maxWidth);
+      chatPane.style.setProperty("--chat-width", `${next}px`);
+      chatPane.style.width = `${next}px`;
+    },
+    () => {
+      if (!chatPane || !mainArea) return;
+      const width = Math.round(chatPane.getBoundingClientRect().width);
+      const mainWidth = mainArea.getBoundingClientRect().width;
+      const minWidth = getChatMinWidth(mainWidth);
+      const maxWidth = Math.round(Math.max(minWidth, mainWidth - 20));
+      if (width >= maxWidth - 2) {
+        chatPane.style.setProperty("--chat-width", "100%");
+        chatPane.style.width = "100%";
+      }
+    }
+  );
+
+  if (chatResizer) {
+    chatResizer.addEventListener("dblclick", () => {
+      if (!chatPane) return;
+      chatPane.style.setProperty("--chat-width", "100%");
+      chatPane.style.width = "100%";
+    });
+  }
+
+  window.addEventListener("resize", () => {
+    if (!chatPane || !mainArea) return;
+    const explicitWidth = chatPane.style.width;
+    if (!explicitWidth || explicitWidth === "100%") {
+      chatPane.style.setProperty("--chat-width", "100%");
+      chatPane.style.width = "100%";
+      return;
+    }
+    const currentWidth = Math.round(chatPane.getBoundingClientRect().width);
+    const mainWidth = mainArea.getBoundingClientRect().width;
+    const minWidth = getChatMinWidth(mainWidth);
+    const maxWidth = Math.max(minWidth, mainWidth - 20);
+    const next = clamp(currentWidth, minWidth, maxWidth);
+    if (next >= maxWidth - 2) {
+      chatPane.style.setProperty("--chat-width", "100%");
+      chatPane.style.width = "100%";
+      return;
+    }
+    chatPane.style.setProperty("--chat-width", `${next}px`);
+    chatPane.style.width = `${next}px`;
+  });
+}
 
 function isDocReady(doc) {
   return String(doc.status || "").toLowerCase() === "ready";
@@ -95,13 +276,16 @@ function updateScopeControls(docs) {
 async function fetchHealth() {
   const res = await fetch("/api/health");
   const data = await res.json();
-  statusEl.textContent = data.vlm_enabled ? "VLM enabled" : "VLM disabled";
+  if (statusEl) {
+    statusEl.textContent = data.vlm_enabled ? "VLM enabled" : "VLM disabled";
+  }
 }
 
 function renderDocs(docs) {
   docList.innerHTML = "";
   if (!docs.length) {
     const li = document.createElement("li");
+    li.className = "doc-item";
     li.textContent = "No documents yet.";
     docList.appendChild(li);
     updateScopeControls(docs);
@@ -117,9 +301,14 @@ function renderDocs(docs) {
     li.className = "doc-item";
     li.innerHTML = `
       <div class="doc-main-wrap">
-        <label class="doc-scope-toggle" title="${ready ? "Include this document in chat context" : "Only ready documents can be selected"}">
-          <input class="doc-select-checkbox" data-doc-id="${doc.id}" type="checkbox" ${checked ? "checked" : ""} ${ready ? "" : "disabled"} />
-        </label>
+        <div class="doc-controls">
+          <label class="doc-scope-toggle" title="${ready ? "Include this document in chat context" : "Only ready documents can be selected"}">
+            <input class="doc-select-checkbox" data-doc-id="${doc.id}" type="checkbox" ${checked ? "checked" : ""} ${ready ? "" : "disabled"} />
+          </label>
+          <button class="delete-btn" data-doc-id="${doc.id}" type="button" aria-label="Delete document ${escapeHtml(doc.filename)}" title="Delete document">
+            <img src="${TRASH_ICON_SRC}" alt="" />
+          </button>
+        </div>
         <div class="doc-main">
           <strong>${doc.filename}</strong>
           <span>${statusLabel}</span>
@@ -131,7 +320,6 @@ function renderDocs(docs) {
           </div>
         </div>
       </div>
-      <button class="delete-btn" data-doc-id="${doc.id}" type="button">Delete</button>
     `;
     docList.appendChild(li);
   });
@@ -325,6 +513,12 @@ sendBtn.addEventListener("click", async () => {
   }
 });
 
+chatInput.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || event.shiftKey) return;
+  event.preventDefault();
+  sendBtn.click();
+});
+
 selectAllDocs.addEventListener("change", () => {
   const readyDocIds = getReadyDocIds(docsCache);
   if (selectAllDocs.checked) {
@@ -355,21 +549,24 @@ docList.addEventListener("change", (event) => {
 
 fetchHealth();
 fetchDocs();
+setupLayoutInteractions();
 
 docList.addEventListener("click", async (event) => {
   const target = event.target;
-  if (!(target instanceof HTMLButtonElement) || !target.classList.contains("delete-btn")) {
+  if (!(target instanceof Element)) {
     return;
   }
+  const deleteBtn = target.closest("button.delete-btn");
+  if (!(deleteBtn instanceof HTMLButtonElement)) return;
 
-  const docId = target.dataset.docId;
+  const docId = deleteBtn.dataset.docId;
   if (!docId) return;
 
   const confirmed = window.confirm("Delete this document and all indexed chunks?");
   if (!confirmed) return;
 
-  target.disabled = true;
-  target.textContent = "Deleting...";
+  deleteBtn.disabled = true;
+  deleteBtn.classList.add("is-loading");
   try {
     const res = await fetch(`/api/documents/${encodeURIComponent(docId)}`, { method: "DELETE" });
     if (!res.ok) {
@@ -381,8 +578,8 @@ docList.addEventListener("click", async (event) => {
     addMessage(`Deleted document ${docId}.`, "assistant");
   } catch (error) {
     addMessage(`Delete failed: ${error.message}`, "assistant");
-    target.disabled = false;
-    target.textContent = "Delete";
+    deleteBtn.disabled = false;
+    deleteBtn.classList.remove("is-loading");
   }
 });
 

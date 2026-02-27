@@ -1,0 +1,148 @@
+version: 1
+datasets:
+  canonical_pdf:
+    kind: file
+    path: "test_docs/LakeRunner/LakeRunner.pdf"
+
+  canonical_pptx:
+    kind: file
+    path: "test_docs/LakeRunner/LakeRunner.pptx"
+
+  canonical_xlsx:
+    kind: file
+    path: "test_docs/LakeRunner/Lakerunner license.xlsx"
+
+  canonical_docx:
+    kind: file
+    path: "test_docs/Ashnik Invoice-20260223T051635Z-1-001/Ashnik Invoice/Invoice INV-ID-21-0015.docx"
+
+  canonical_jpg:
+    kind: file
+    path: "test_docs/3-ML-Lifecycle-Detail.jpg"
+
+  canonical_diagram_png:
+    kind: file
+    path: "test_docs/Intelligent Retrieval System.drawio (2).png"
+
+  transparent_png:
+    kind: file
+    path: "test_docs/PNG_transparency_demonstration_1.png"
+
+  test_pptx:
+    kind: file
+    path: "test_docs/test.pptx"
+
+  lakerunner_pptx_airtel_1:
+    kind: file
+    path: "test_docs/LakeRunner/Airtel Cloud PPT 1.pptx"
+
+  lakerunner_pptx_airtel_prep:
+    kind: file
+    path: "test_docs/LakeRunner/Airtel Cloud Prep.pptx"
+
+  lakerunner_pptx_multitenant:
+    kind: file
+    path: "test_docs/LakeRunner/Lakerunner_updated_with_licensing_multitenant 1.pptx"
+
+  invoice_pdf_0003:
+    kind: file
+    path: "test_docs/Ashnik Invoice-20260223T051635Z-1-001/Ashnik Invoice/Invoice INV-ID-21-0003.pdf"
+
+  invoice_pdf_0015:
+    kind: file
+    path: "test_docs/Ashnik Invoice-20260223T051635Z-1-001/Ashnik Invoice/Invoice INV-ID-21-0015.pdf"
+
+  invoice_pdf_0024:
+    kind: file
+    path: "test_docs/Ashnik Invoice-20260223T051635Z-1-001/Ashnik Invoice/Invoice INV-ID-21-0024.pdf"
+
+  representative_invoice_pdfs:
+    kind: paths
+    paths:
+      - "test_docs/Ashnik Invoice-20260223T051635Z-1-001/Ashnik Invoice/Invoice INV-ID-21-0003.pdf"
+      - "test_docs/Ashnik Invoice-20260223T051635Z-1-001/Ashnik Invoice/Invoice INV-ID-21-0015.pdf"
+      - "test_docs/Ashnik Invoice-20260223T051635Z-1-001/Ashnik Invoice/Invoice INV-ID-21-0024.pdf"
+
+  all_invoice_pdfs:
+    kind: dir_all
+    root: "test_docs/Ashnik Invoice-20260223T051635Z-1-001/Ashnik Invoice"
+    pattern: "*.pdf"
+    recursive: false
+
+  canonical_small_pack:
+    kind: paths
+    paths:
+      - "test_docs/LakeRunner/LakeRunner.pdf"
+      - "test_docs/test.pptx"
+      - "test_docs/LakeRunner/Lakerunner license.xlsx"
+      - "test_docs/Ashnik Invoice-20260223T051635Z-1-001/Ashnik Invoice/Invoice INV-ID-21-0015.docx"
+      - "test_docs/Intelligent Retrieval System.drawio (2).png"
+      - "test_docs/3-ML-Lifecycle-Detail.jpg"
+
+  canonical_small_suite:
+    kind: paths
+    paths:
+      - "test_docs/LakeRunner/LakeRunner.pdf"
+      - "test_docs/LakeRunner/LakeRunner.pptx"
+      - "test_docs/Ashnik Invoice-20260223T051635Z-1-001/Ashnik Invoice/Invoice INV-ID-21-0015.pdf"
+      - "test_docs/Intelligent Retrieval System.drawio (2).png"
+      - "test_docs/LakeRunner/Lakerunner license.xlsx"
+      - "test_docs/Ashnik Invoice-20260223T051635Z-1-001/Ashnik Invoice/Invoice INV-ID-21-0015.docx"
+
+  all_lakerunner_docs:
+    kind: paths
+    paths:
+      - "test_docs/LakeRunner/LakeRunner.pdf"
+      - "test_docs/LakeRunner/LakeRunner.pptx"
+      - "test_docs/LakeRunner/Airtel Cloud PPT 1.pptx"
+      - "test_docs/LakeRunner/Airtel Cloud Prep.pptx"
+      - "test_docs/LakeRunner/Lakerunner_updated_with_licensing_multitenant 1.pptx"
+      - "test_docs/LakeRunner/Lakerunner license.xlsx"
+
+  lakerunner_slide_decks:
+    kind: paths
+    paths:
+      - "test_docs/LakeRunner/LakeRunner.pptx"
+      - "test_docs/LakeRunner/Lakerunner_updated_with_licensing_multitenant 1.pptx"
+
+  test_images_first_50:
+    kind: dir_first_n
+    root: "test_docs/test images"
+    pattern: "*.png"
+    n: 50
+    recursive: false
+
+  spdocvqa_first_20:
+    kind: dir_first_n
+    root: "test_docs/spdocvqa_images"
+    pattern: "*.png"
+    n: 20
+    recursive: false
+
+  spdocvqa_first_50:
+    kind: dir_first_n
+    root: "test_docs/spdocvqa_images"
+    pattern: "*.png"
+    n: 50
+    recursive: false
+
+  spdocvqa_first_200:
+    kind: dir_first_n
+    root: "test_docs/spdocvqa_images"
+    pattern: "*.png"
+    n: 200
+    recursive: false
+
+  spdocvqa_first_500:
+    kind: dir_first_n
+    root: "test_docs/spdocvqa_images"
+    pattern: "*.png"
+    n: 500
+    recursive: false
+
+  spdocvqa_all:
+    kind: dir_all
+    root: "test_docs/spdocvqa_images"
+    pattern: "*.png"
+    recursive: false
+

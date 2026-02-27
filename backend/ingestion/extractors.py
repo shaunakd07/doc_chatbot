@@ -221,6 +221,27 @@ def _render_pptx_slides(path: Path) -> List[Block]:
     return blocks
 
 
+def _should_render_pptx_slides(
+    *,
+    total_text_chars: int,
+    embedded_image_count: int,
+    slide_count: int,
+) -> bool:
+    policy = str(config.PPTX_SLIDE_RENDER_POLICY).strip().lower()
+    if policy == "never":
+        return False
+    if policy == "always":
+        return True
+    if slide_count <= 0:
+        return False
+    min_text_chars = max(0, int(config.PPTX_MIN_TEXT_CHARS_FOR_SKIP_RENDER))
+    if total_text_chars < min_text_chars:
+        return True
+    # For image-heavy decks with low extracted text, full-slide render is still useful
+    # for screenshots/background image text that OOXML parsing cannot read.
+    return embedded_image_count <= 0 and total_text_chars < (min_text_chars * 2)
+
+
 def _extract_keywords(text: str, limit: int = 8) -> List[str]:
     tokens = re.findall(r"[A-Za-z0-9_]{3,}", str(text or "").lower())
     counts = Counter(token for token in tokens if token not in PPTX_STOPWORDS)
@@ -307,6 +328,9 @@ def _document_graph_to_text(graph: Dict[str, object]) -> str:
 
 def extract_pdf(path: Path) -> List[Block]:
     blocks: List[Block] = []
+    render_mode = str(config.PDF_RENDER_MODE).strip().lower()
+    if render_mode not in {"all", "needed", "none"}:
+        render_mode = "needed"
 
     with fitz.open(str(path)) as doc:
         for page_index, page in enumerate(doc, start=1):
@@ -327,22 +351,24 @@ def extract_pdf(path: Path) -> List[Block]:
                     }
                 )
 
-            # Keep page images for visual follow-up and OCR fallback on scanned pages.
-            pix = page.get_pixmap(dpi=config.PDF_RENDER_DPI)
-            if pix.alpha:
-                pix = fitz.Pixmap(fitz.csRGB, pix)
-            image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-            blocks.append(
-                {
-                    "page": page_index,
-                    "type": "image",
-                    "image": image,
-                    "metadata": {
-                        "ocr_fallback_required": needs_ocr_fallback,
-                        "native_text_chars": native_non_ws_chars,
-                    },
-                }
-            )
+            should_render_image = render_mode == "all" or (render_mode == "needed" and needs_ocr_fallback)
+            if should_render_image:
+                # Keep page images for OCR fallback (and optional visual follow-up when configured).
+                pix = page.get_pixmap(dpi=config.PDF_RENDER_DPI)
+                if pix.alpha:
+                    pix = fitz.Pixmap(fitz.csRGB, pix)
+                image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                blocks.append(
+                    {
+                        "page": page_index,
+                        "type": "image",
+                        "image": image,
+                        "metadata": {
+                            "ocr_fallback_required": needs_ocr_fallback,
+                            "native_text_chars": native_non_ws_chars,
+                        },
+                    }
+                )
 
     return blocks
 
@@ -353,6 +379,8 @@ def extract_pptx(path: Path) -> List[Block]:
     slide_width = max(1, int(prs.slide_width or 1))
     slide_height = max(1, int(prs.slide_height or 1))
     doc_slide_nodes: List[Dict[str, object]] = []
+    total_slide_text_chars = 0
+    embedded_image_count = 0
 
     for slide_index, slide in enumerate(prs.slides, start=1):
         slide_text_parts: List[str] = []
@@ -427,6 +455,7 @@ def extract_pptx(path: Path) -> List[Block]:
                 image_bytes = shape.image.blob
                 image = _image_from_blob(image_bytes)
                 if image is not None:
+                    embedded_image_count += 1
                     node["node_kind"] = "image"
                     blocks.append(
                         {
@@ -497,6 +526,7 @@ def extract_pptx(path: Path) -> List[Block]:
             )
 
         slide_text = "\n".join(part for part in slide_text_parts if part).strip()
+        total_slide_text_chars += len(slide_text)
         keywords = _extract_keywords(slide_text)
         title = ""
         if slide_text:
@@ -598,9 +628,14 @@ def extract_pptx(path: Path) -> List[Block]:
             }
         )
 
-    rendered_blocks = _render_pptx_slides(path)
-    if rendered_blocks:
-        blocks.extend(rendered_blocks)
+    if _should_render_pptx_slides(
+        total_text_chars=total_slide_text_chars,
+        embedded_image_count=embedded_image_count,
+        slide_count=len(prs.slides),
+    ):
+        rendered_blocks = _render_pptx_slides(path)
+        if rendered_blocks:
+            blocks.extend(rendered_blocks)
 
     return blocks
 

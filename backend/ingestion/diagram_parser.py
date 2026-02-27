@@ -267,7 +267,7 @@ def _get_ocr_extractor():
 
 
 def _label_for_bbox(image_rgb: np.ndarray, bbox: Dict[str, int]) -> str:
-    if not config.ENABLE_PADDLE_OCR:
+    if not config.ENABLE_OCR:
         return ""
     extractor = _get_ocr_extractor()
     if extractor is None:
@@ -277,6 +277,15 @@ def _label_for_bbox(image_rgb: np.ndarray, bbox: Dict[str, int]) -> str:
     if crop.size <= 0:
         return ""
     pil_crop = Image.fromarray(crop)
+    max_side = max(0, int(config.OCR_DIAGRAM_CROP_MAX_SIDE))
+    if max_side > 0:
+        width, height = pil_crop.size
+        largest_side = max(width, height)
+        if largest_side > max_side:
+            scale = max_side / float(largest_side)
+            target_size = (max(1, int(width * scale)), max(1, int(height * scale)))
+            resample_bilinear = getattr(getattr(Image, "Resampling", Image), "BILINEAR", Image.BILINEAR)
+            pil_crop = pil_crop.resize(target_size, resample=resample_bilinear)
     result = extractor(pil_crop)
     return str(result.get("text") or "").strip()
 
@@ -284,10 +293,30 @@ def _label_for_bbox(image_rgb: np.ndarray, bbox: Dict[str, int]) -> str:
 def _build_nodes(image_rgb: np.ndarray, candidates: List[Dict[str, Any]], width: int, height: int) -> List[Dict[str, Any]]:
     nodes: List[Dict[str, Any]] = []
     max_nodes = max(1, int(config.DIAGRAM_MAX_NODES))
-    for idx, candidate in enumerate(candidates[:max_nodes], start=1):
+    working = list(candidates[:max_nodes])
+
+    ocr_top_k = max(0, int(config.DIAGRAM_NODE_OCR_TOP_K))
+    ocr_min_area = max(0, int(config.DIAGRAM_NODE_OCR_MIN_AREA))
+    ocr_min_score = float(config.DIAGRAM_NODE_OCR_MIN_SCORE)
+    ocr_ranked: List[tuple[int, float]] = []
+    cached_bboxes: list[Dict[str, int]] = []
+    for idx, candidate in enumerate(working):
         bbox = _clamp_bbox(candidate["bbox"], width, height)
+        cached_bboxes.append(bbox)
+        area = _bbox_area(bbox)
+        score = float(candidate.get("score", 0.0))
+        if area < ocr_min_area or score < ocr_min_score:
+            continue
+        ocr_ranked.append((idx, float(area) * max(0.05, score)))
+    ocr_allowed: set[int] = {
+        idx for idx, _ in sorted(ocr_ranked, key=lambda item: item[1], reverse=True)[:ocr_top_k]
+    }
+
+    for idx, candidate in enumerate(working, start=1):
+        bbox = cached_bboxes[idx - 1]
         center = _bbox_center(bbox)
-        label = _label_for_bbox(image_rgb, bbox)
+        use_ocr = (idx - 1) in ocr_allowed
+        label = _label_for_bbox(image_rgb, bbox) if use_ocr else ""
         node_id = f"node_{idx:03d}"
         nodes.append(
             {
@@ -440,11 +469,9 @@ def parse_image_diagram(
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
 
     yolo_nodes = _detect_nodes_yolo(bgr, width, height)
-    fallback_nodes = _detect_nodes_opencv(gray, width, height)
-    candidates = yolo_nodes if yolo_nodes else fallback_nodes
-    lines = _detect_lines(gray)
+    candidates = yolo_nodes if yolo_nodes else _detect_nodes_opencv(gray, width, height)
 
-    if not candidates and not lines:
+    if not candidates:
         return {
             "status": "no_structure",
             "parser_version": "diagram-v1",
@@ -454,6 +481,8 @@ def parse_image_diagram(
             "edge_chunks": [],
             "confidence": 0.0,
         }
+
+    lines = _detect_lines(gray)
 
     nodes = _build_nodes(rgb, candidates, width, height)
     edges = _assign_edges(nodes, lines)

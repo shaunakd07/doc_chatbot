@@ -1,0 +1,54 @@
+version: 1
+profiles:
+  - name: smoke
+    description: Fast validation profile for harness plumbing and core ingestion/chat behavior.
+    include_case_ids:
+      - A-001
+      - A-002
+      - A-005
+      - E-002
+      - F-001
+    allow_manual_cases: false
+    max_files_per_case: 10
+    stop_on_failure: true
+
+  - name: small_regression
+    description: Day-to-day regression profile across ingestion, extraction, integrity, and retrieval.
+    include_suites: [A, B, E, F, H]
+    allow_manual_cases: false
+    max_files_per_case: 300
+    stop_on_failure: false
+
+  - name: medium_scale
+    description: Scale-focused profile on medium-volume image workloads.
+    include_case_ids:
+      - C-004
+      - D-006
+      - G-001
+      - G-003
+    allow_manual_cases: false
+    max_files_per_case: 500
+    stop_on_failure: false
+
+  - name: full_automated
+    description: Full automated profile (all suites excluding manual-only cases).
+    include_suites: [A, B, C, D, E, F, G, H]
+    allow_manual_cases: false
+    stop_on_failure: false
+
+  - name: full_longrun
+    description: Long-running full profile including largest corpus case(s).
+    include_suites: [A, B, C, D, E, F, G, H]
+    include_case_ids:
+      - G-002
+    allow_manual_cases: false
+    stop_on_failure: false
+
+  - name: manual_resilience
+    description: Manual restart and resilience scenarios requiring operator intervention.
+    include_case_ids:
+      - C-005
+      - G-004
+    allow_manual_cases: true
+    stop_on_failure: false
+

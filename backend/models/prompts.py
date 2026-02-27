@@ -4,6 +4,7 @@ SYSTEM_PROMPT = (
     "You are a strict document QA assistant. You must answer the question using ONLY the provided context.\n"
     "Under NO circumstances should you use your external knowledge or hallucinate details.\n"
     "When the question is open-ended (for example: explain, summarize, describe), provide the best evidence-based explanation from the context and clearly note any missing details.\n"
+    "If evidence is partial, provide a best-effort answer and explicitly state uncertainty.\n"
     "Use the exact fallback sentence 'I cannot find the answer in the provided documents.' ONLY when there is no relevant evidence at all.\n"
     "Always cite your sources using the full [source:...] tags provided in the text.\n"
     "Every citation must include the document name field (`doc:`); never cite using doc_id alone.\n"
@@ -19,7 +20,7 @@ COMPARE_SYSTEM_PROMPT = (
     "Every citation must include the document name field (`doc:`); never cite using doc_id alone.\n"
     "Formatting rules:\n"
     "- Put the direct answer first.\n"
-    "- Explain changes over time in short paragraphs.\n"
+    "- Include a 'Key changes over time' section only when the user asks for changes, progression, or timeline.\n"
     "- Use plain text section headers and paragraph spacing; avoid long numbered lists."
 )
 
@@ -43,23 +44,19 @@ def build_compare_prompt(
     context = "\n".join(context_blocks)
     briefs = "\n\n".join(document_briefs)
     summaries_instruction = (
-        "3) Document summaries\n"
-        "Place this section last. Use one short paragraph per document.\n\n"
+        "If helpful, add a 'Document summaries' section at the end with one short paragraph per document.\n"
         "Do not repeat the same document summary multiple times; merge duplicates or near-identical versions into one summary.\n\n"
         f"Document briefs:\n{briefs}\n\n"
     )
     if not include_document_summaries:
         summaries_instruction = (
-            "3) Document summaries\n"
             "Do NOT include a document summaries section in your final answer.\n\n"
         )
     return (
         f"{COMPARE_SYSTEM_PROMPT}\n\n"
-        "Required output order:\n"
-        "1) Answer\n"
-        "Write 1-2 short paragraphs that directly answer the question.\n\n"
-        "2) Key changes over time\n"
-        "Write short paragraphs describing notable additions/removals, role progression, and timeline shifts.\n\n"
+        "Guidance:\n"
+        "- Start with a direct answer in 1-2 short paragraphs.\n"
+        "- Add a 'Key changes over time' section only when the question asks for timeline/progression/change analysis.\n"
         f"{summaries_instruction}"
         f"Evidence context:\n{context}\n\n"
         f"Question: {question}\n"

@@ -34,16 +34,16 @@ class SparseIndex:
         self.postings = defaultdict(list)
         self.doc_freq = defaultdict(int)
         for chunk in storage.list_chunks():
-            self.add_chunk(chunk)
+            self.add_chunk(chunk, recompute_avg_len=False)
         self._recompute_avg_len()
 
-    def add_chunk(self, chunk: dict) -> None:
+    def add_chunk(self, chunk: dict, recompute_avg_len: bool = True) -> bool:
         chunk_id = str(chunk.get("id") or "")
         if not chunk_id:
-            return
+            return False
         tokens = self._tokenize(str(chunk.get("content") or ""))
         if not tokens:
-            return
+            return False
         tf = Counter(tokens)
         doc_len = len(tokens)
         self.docs[chunk_id] = {
@@ -54,13 +54,18 @@ class SparseIndex:
         for term, count in tf.items():
             self.postings[term].append((chunk_id, int(count)))
             self.doc_freq[term] += 1
-        self._recompute_avg_len()
+        if recompute_avg_len:
+            self._recompute_avg_len()
+        return True
 
     def add_chunks(self, chunks: List[dict]) -> None:
         if not chunks:
             return
+        changed = False
         for chunk in chunks:
-            self.add_chunk(chunk)
+            changed = self.add_chunk(chunk, recompute_avg_len=False) or changed
+        if changed:
+            self._recompute_avg_len()
 
     def _idf(self, term: str) -> float:
         n_docs = len(self.docs)

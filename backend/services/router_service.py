@@ -11,7 +11,15 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 logger = logging.getLogger(__name__)
 
-ALLOWED_TASK_TYPES = {"qa", "compare", "summarize", "image_qa", "timeline", "out_of_scope"}
+ALLOWED_TASK_TYPES = {
+    "qa",
+    "compare",
+    "summarize",
+    "image_qa",
+    "timeline",
+    "trend_analysis",
+    "out_of_scope",
+}
 ALLOWED_STRATEGIES = {"semantic", "balanced", "image_first"}
 
 
@@ -72,10 +80,19 @@ class RouterService:
         available_count = len(available_docs or [])
         system_prompt = (
             "You are a routing classifier for a document chatbot. "
-            "Return ONLY JSON with keys: task_type, needs_cross_doc, needs_image_reasoning, "
-            "retrieval_plan, confidence, rationale. "
-            "task_type must be one of qa, compare, summarize, image_qa, timeline, out_of_scope. "
-            "retrieval_plan must contain strategy (semantic|balanced|image_first), top_k, per_doc_limit."
+            "Return ONLY JSON with keys: task_type, needs_cross_doc, needs_numeric_extraction, "
+            "needs_image_reasoning, retrieval_plan, analysis_plan, confidence, rationale. "
+            "task_type must be one of qa, compare, summarize, image_qa, timeline, trend_analysis, out_of_scope. "
+            "retrieval_plan must contain strategy (semantic|balanced|image_first), top_k, per_doc_limit. "
+            "Set task_type=compare ONLY when the user explicitly asks to compare or asks for differences, changes, "
+            "before/after, or timeline evolution. For multi-document synthesis or aggregation questions that do not "
+            "ask for differences, set task_type=qa and needs_cross_doc=true. "
+            "Set task_type=trend_analysis for analytical questions requiring trend/pattern analysis over evidence. "
+            "For trend_analysis set needs_cross_doc=true and needs_numeric_extraction=true. "
+            "analysis_plan should include query_entities (list[str]) and evidence_classes (list[str]) inferred "
+            "from the query content, not hardcoded labels. "
+            "When needs_cross_doc=true, prefer retrieval_plan.strategy=balanced with top_k>=10 and per_doc_limit>=2. "
+            "needs_cross_doc indicates retrieval coverage across multiple docs, not answer format."
         )
         user_prompt = (
             f"Question: {question}\n"
@@ -143,15 +160,57 @@ class RouterService:
         except Exception:
             confidence = 0.5
         confidence = max(0.0, min(1.0, confidence))
+        needs_cross_doc = bool(data.get("needs_cross_doc", False))
+        needs_numeric_extraction = bool(data.get("needs_numeric_extraction", False))
+        if task_type == "trend_analysis":
+            needs_cross_doc = True
+            needs_numeric_extraction = True
+        if needs_cross_doc:
+            if strategy == "semantic":
+                strategy = "balanced"
+            top_k = max(10, top_k)
+            per_doc_limit = max(2, per_doc_limit)
+        if needs_numeric_extraction:
+            if strategy == "semantic":
+                strategy = "balanced"
+            top_k = max(12, top_k)
+            per_doc_limit = max(2, per_doc_limit)
+
+        analysis_plan: Dict[str, Any] = {}
+        raw_plan = data.get("analysis_plan")
+        if isinstance(raw_plan, dict):
+            raw_entities = raw_plan.get("query_entities")
+            entities: List[str] = []
+            if isinstance(raw_entities, list):
+                for value in raw_entities[:12]:
+                    text = str(value or "").strip()
+                    if text and text not in entities:
+                        entities.append(text)
+            raw_classes = raw_plan.get("evidence_classes")
+            evidence_classes: List[str] = []
+            if isinstance(raw_classes, list):
+                for value in raw_classes[:8]:
+                    if isinstance(value, dict):
+                        text = str(value.get("label") or value.get("name") or "").strip()
+                    else:
+                        text = str(value or "").strip()
+                    if text and text not in evidence_classes:
+                        evidence_classes.append(text)
+            if entities:
+                analysis_plan["query_entities"] = entities
+            if evidence_classes:
+                analysis_plan["evidence_classes"] = evidence_classes
         return {
             "task_type": task_type,
-            "needs_cross_doc": bool(data.get("needs_cross_doc", False)),
+            "needs_cross_doc": needs_cross_doc,
+            "needs_numeric_extraction": needs_numeric_extraction,
             "needs_image_reasoning": bool(data.get("needs_image_reasoning", False)),
             "retrieval_plan": {
                 "strategy": strategy,
                 "top_k": max(1, min(32, top_k)),
                 "per_doc_limit": max(1, min(12, per_doc_limit)),
             },
+            "analysis_plan": analysis_plan,
             "confidence": confidence,
             "rationale": str(data.get("rationale", "")).strip(),
         }

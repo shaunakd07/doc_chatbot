@@ -12,9 +12,8 @@
       <header class="hero">
         <div>
           <h1>Doc Chatbot</h1>
-          <p>Local multimodal doc Q&A with InternVL2.5‑2B.</p>
+          <p>Local multimodal model</p>
         </div>
-        <div class="status" id="status">Checking status...</div>
       </header>
 
       <section class="panel upload">
@@ -35,11 +34,14 @@
         </div>
       </section>
 
-      <section class="panel grid">
-        <div class="docs">
+      <section class="workspace" id="workspace">
+        <aside class="panel docs-sidebar" id="docsSidebar">
           <div class="docs-header">
             <h3>Documents</h3>
-            <button id="deleteAllBtn" class="delete-all-btn" type="button">Delete All</button>
+            <div class="docs-header-actions">
+              <button id="collapseSidebarBtn" class="collapse-btn" type="button" aria-expanded="true">Collapse</button>
+              <button id="deleteAllBtn" class="delete-all-btn" type="button">Delete All</button>
+            </div>
           </div>
           <div class="scope-controls">
             <label class="scope-select-all">
@@ -48,20 +50,33 @@
             </label>
             <span id="scopeSummary" class="scope-summary">0/0 selected</span>
           </div>
-          <ul id="docList" class="doc-list"></ul>
-        </div>
-        <div class="chat">
-          <h3>Chat</h3>
-          <label class="chat-option">
-            <input id="includeDocSummaries" type="checkbox" checked />
-            <span>Include document summaries</span>
-          </label>
-          <div id="chatLog" class="chat-log"></div>
-          <div class="chat-input">
-            <input id="chatInput" type="text" placeholder="Ask about your documents..." />
-            <button id="sendBtn">Send</button>
+          <div class="doc-list-wrap">
+            <ul id="docList" class="doc-list"></ul>
           </div>
-        </div>
+        </aside>
+
+        <div id="sidebarResizer" class="resizer sidebar-resizer" role="separator" aria-orientation="vertical" aria-label="Resize documents sidebar"></div>
+
+        <section class="main-area" id="mainArea">
+          <button id="expandSidebarBtn" class="expand-sidebar-btn" type="button" aria-expanded="false">Show Documents</button>
+          <div class="panel chat chat-pane" id="chatPane">
+            <div class="chat-head">
+              <h2>Ask anything about your documents</h2>
+              <label class="chat-option">
+                <input id="includeDocSummaries" type="checkbox" checked />
+                <span>Include document summaries</span>
+              </label>
+            </div>
+            <div class="chat-input-wrap">
+              <div class="chat-input">
+                <input id="chatInput" type="text" placeholder="Ask about your documents..." />
+                <button id="sendBtn">Send</button>
+              </div>
+            </div>
+            <div id="chatLog" class="chat-log"></div>
+            <div id="chatResizer" class="resizer chat-resizer" role="separator" aria-orientation="vertical" aria-label="Resize chat panel"></div>
+          </div>
+        </section>
       </section>
     </main>
 

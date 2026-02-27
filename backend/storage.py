@@ -521,6 +521,52 @@ def get_chunk(chunk_id: str) -> Optional[Dict[str, Any]]:
     return _row_to_chunk(row) if row else None
 
 
+def add_diagram_graphs(records: Iterable[Dict[str, Any]]) -> None:
+    rows: List[Tuple[str, str, int, str, str, str, float, str, str]] = []
+    for record in records:
+        graph_payload = record.get("graph")
+        if not isinstance(graph_payload, dict):
+            continue
+        graph_id = str(record.get("id") or "").strip()
+        doc_id = str(record.get("doc_id") or "").strip()
+        if not graph_id or not doc_id:
+            continue
+        rows.append(
+            (
+                graph_id,
+                doc_id,
+                int(record.get("page") or 1),
+                str(record.get("image_path") or ""),
+                str(record.get("parser_version") or "diagram-v1"),
+                json.dumps(graph_payload),
+                float(record.get("confidence") or 0.0),
+                str(record.get("created_at") or ""),
+                json.dumps(record.get("metadata") or {}),
+            )
+        )
+    if not rows:
+        return
+
+    with _connect() as conn:
+        if _is_postgres():
+            conn.executemany(
+                """
+                INSERT INTO diagram_graphs (id, doc_id, page, image_path, parser_version, graph_json, confidence, created_at, metadata)
+                VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s::jsonb)
+                """,
+                rows,
+            )
+        else:
+            conn.executemany(
+                """
+                INSERT INTO diagram_graphs (id, doc_id, page, image_path, parser_version, graph_json, confidence, created_at, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+        conn.commit()
+
+
 def add_diagram_graph(
     graph_id: str,
     doc_id: str,
@@ -532,46 +578,21 @@ def add_diagram_graph(
     created_at: str,
     metadata: Optional[Dict[str, Any]] = None,
 ) -> None:
-    graph_payload = json.dumps(graph)
-    metadata_payload = json.dumps(metadata or {})
-    with _connect() as conn:
-        if _is_postgres():
-            conn.execute(
-                """
-                INSERT INTO diagram_graphs (id, doc_id, page, image_path, parser_version, graph_json, confidence, created_at, metadata)
-                VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s::jsonb)
-                """,
-                (
-                    graph_id,
-                    doc_id,
-                    page,
-                    image_path,
-                    parser_version,
-                    graph_payload,
-                    float(confidence),
-                    created_at,
-                    metadata_payload,
-                ),
-            )
-        else:
-            conn.execute(
-                """
-                INSERT INTO diagram_graphs (id, doc_id, page, image_path, parser_version, graph_json, confidence, created_at, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    graph_id,
-                    doc_id,
-                    page,
-                    image_path,
-                    parser_version,
-                    graph_payload,
-                    float(confidence),
-                    created_at,
-                    metadata_payload,
-                ),
-            )
-        conn.commit()
+    add_diagram_graphs(
+        [
+            {
+                "id": graph_id,
+                "doc_id": doc_id,
+                "page": page,
+                "image_path": image_path,
+                "parser_version": parser_version,
+                "graph": graph,
+                "confidence": confidence,
+                "created_at": created_at,
+                "metadata": metadata or {},
+            }
+        ]
+    )
 
 
 def list_diagram_graphs(

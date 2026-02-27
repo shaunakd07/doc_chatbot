@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 import json
 import logging
 import shutil
@@ -7,7 +8,7 @@ import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import BackgroundTasks, FastAPI, File, UploadFile
+from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
@@ -20,9 +21,10 @@ if __package__ in (None, ""):
     from backend.index.reranker import Reranker
     from backend.index.sparse_index import SparseIndex
     from backend.index.vector_index import VectorIndex
-    from backend.ingestion.pipeline import create_document_record, ingest_file, safe_path_for_upload
+    from backend.ingestion.pipeline import create_document_record, safe_path_for_upload
     from backend.models.openai_chat import OpenAIChatModel
     from backend.services.chat_service import ChatService
+    from backend.services.ingestion_queue import IngestionQueue
     from backend.services.openai_router_service import OpenAIRouterService
     from backend.services.router_service import RouterService
     from backend.services.retrieval_service import RetrievalService
@@ -32,9 +34,10 @@ else:
     from .index.reranker import Reranker
     from .index.sparse_index import SparseIndex
     from .index.vector_index import VectorIndex
-    from .ingestion.pipeline import create_document_record, ingest_file, safe_path_for_upload
+    from .ingestion.pipeline import create_document_record, safe_path_for_upload
     from .models.openai_chat import OpenAIChatModel
     from .services.chat_service import ChatService
+    from .services.ingestion_queue import IngestionQueue
     from .services.openai_router_service import OpenAIRouterService
     from .services.router_service import RouterService
     from .services.retrieval_service import RetrievalService
@@ -43,16 +46,9 @@ else:
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 
-app = FastAPI(title="Doc Chatbot", version="0.1.0")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 BASE_DIR = Path(__file__).resolve().parents[1]
 FRONTEND_DIR = BASE_DIR / "frontend"
+ICONS_DIR = BASE_DIR / "icons"
 
 
 class ChatRequest(BaseModel):
@@ -95,8 +91,7 @@ def _validate_doc_scope(doc_ids: list[str]) -> tuple[list[str] | None, str | Non
     return cleaned, None
 
 
-@app.on_event("startup")
-def startup() -> None:
+def _initialize_app_state(app: FastAPI) -> None:
     config.ensure_dirs()
     storage.init_db()
 
@@ -149,6 +144,27 @@ def startup() -> None:
     app.state.chat_service = chat_service
     app.state.vlm = model
     app.state.router = router
+    app.state.ingestion_queue = IngestionQueue(max_workers=config.INGEST_MAX_WORKERS)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    _initialize_app_state(app)
+    try:
+        yield
+    finally:
+        ingestion_queue = getattr(app.state, "ingestion_queue", None)
+        if ingestion_queue is not None:
+            ingestion_queue.shutdown(wait=False)
+
+
+app = FastAPI(title="Doc Chatbot", version="0.1.0", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/")
@@ -166,9 +182,23 @@ def styles() -> FileResponse:
     return FileResponse(FRONTEND_DIR / "styles.css")
 
 
+@app.get("/icons/{filename}")
+def icon_file(filename: str):
+    icon_root = ICONS_DIR.resolve()
+    icon_path = (icon_root / filename).resolve()
+    try:
+        icon_path.relative_to(icon_root)
+    except ValueError:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if not icon_path.is_file():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return FileResponse(icon_path)
+
+
 @app.get("/api/health")
 def health() -> JSONResponse:
     chat_service = getattr(app.state, "chat_service", None)
+    ingestion_queue = getattr(app.state, "ingestion_queue", None)
     return JSONResponse(
         {
             "status": "ok",
@@ -187,6 +217,8 @@ def health() -> JSONResponse:
             "reranker_model_id": config.RERANK_MODEL_ID if config.ENABLE_RERANKER else None,
             "diagram_pipeline_enabled": config.ENABLE_DIAGRAM_PIPELINE,
             "yolo_diagram_enabled": config.ENABLE_YOLO_DIAGRAM_DETECTOR,
+            "ingest_max_workers": config.INGEST_MAX_WORKERS,
+            "ingest_queue_pending": ingestion_queue.pending_count() if ingestion_queue is not None else 0,
             "cuda_available": torch.cuda.is_available(),
             "cuda_device_count": torch.cuda.device_count(),
             "last_generation_error": getattr(chat_service, "last_generation_error", None),
@@ -225,7 +257,7 @@ def get_document_diagram_graphs(doc_id: str) -> JSONResponse:
 
 
 @app.post("/api/documents")
-def upload_document(background_tasks: BackgroundTasks, file: UploadFile = File(...)) -> JSONResponse:
+def upload_document(file: UploadFile = File(...)) -> JSONResponse:
     doc_id = create_document_record(file.filename)
     try:
         destination = safe_path_for_upload(file.filename, doc_id)
@@ -235,21 +267,34 @@ def upload_document(background_tasks: BackgroundTasks, file: UploadFile = File(.
         storage.delete_document(doc_id)
         return JSONResponse({"error": f"Failed to save upload: {exc}"}, status_code=400)
 
-    background_tasks.add_task(
-        ingest_file,
-        destination,
-        doc_id,
-        app.state.embedder,
-        app.state.vector_index,
-        app.state.sparse_index,
-        app.state.vlm,
-    )
+    try:
+        app.state.ingestion_queue.submit(
+            destination,
+            doc_id,
+            app.state.embedder,
+            app.state.vector_index,
+            app.state.sparse_index,
+            app.state.vlm,
+        )
+    except Exception as exc:
+        storage.update_document(
+            doc_id,
+            status="failed",
+            metadata={
+                "ingest_progress": 0,
+                "ingest_stage": "failed",
+                "ingest_message": "Ingestion queue submission failed",
+                "ingest_error": str(exc)[:800],
+            },
+            merge_metadata=False,
+        )
+        return JSONResponse({"error": f"Failed to queue ingestion: {exc}"}, status_code=500)
 
     return JSONResponse({"doc_id": doc_id, "status": "queued"})
 
 
 @app.post("/api/documents/drive")
-def import_drive_folder(background_tasks: BackgroundTasks, request: DriveRequest) -> JSONResponse:
+def import_drive_folder(request: DriveRequest) -> JSONResponse:
     import gdown
     import tempfile
     
@@ -270,8 +315,7 @@ def import_drive_folder(background_tasks: BackgroundTasks, request: DriveRequest
                 doc_id = create_document_record(p.name)
                 destination = safe_path_for_upload(p.name, doc_id)
                 shutil.copy2(p, destination)
-                background_tasks.add_task(
-                    ingest_file,
+                app.state.ingestion_queue.submit(
                     destination,
                     doc_id,
                     app.state.embedder,

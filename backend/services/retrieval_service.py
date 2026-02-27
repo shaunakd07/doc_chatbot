@@ -127,6 +127,7 @@ class RetrievalService:
             return []
         oversample = max(top_k * 10, 80)
         raw = self._raw_candidates(query, top_k=oversample, mode=mode or self.default_mode)
+        target_count = max(top_k, self.rerank_top_n) if use_rerank else top_k
         by_doc: dict[str, list[dict]] = defaultdict(list)
         doc_cache: dict[str, dict] = {}
         for chunk_id, score in raw:
@@ -153,19 +154,19 @@ class RetrievalService:
         )
         results: List[dict] = []
         idx = 0
-        while len(results) < top_k:
+        while len(results) < target_count:
             added = False
             for doc_id in ranked_docs:
                 chunks = by_doc[doc_id]
                 if idx < len(chunks):
                     results.append(chunks[idx])
                     added = True
-                    if len(results) >= top_k:
+                    if len(results) >= target_count:
                         break
             if not added:
                 break
             idx += 1
         if not use_rerank:
-            return results
+            return results[:top_k]
         reranked = self._maybe_rerank(query, results, top_k=top_k)
         return reranked[:top_k]

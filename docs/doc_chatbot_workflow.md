@@ -153,20 +153,21 @@ OCR is handled in two layers:
 
 ### Why a separate worker process
 
-The OCR worker isolates PaddleOCR runtime from the main API process. This avoids many DLL/CUDA conflicts with other libraries.
+The OCR worker isolates OCR runtime from the main API process. This avoids DLL/CUDA conflicts with other libraries.
 
 ### OCR flow
 
 1. Ingestion sends an image to OCR controller.
 2. Controller encodes image to base64 and sends JSON request to worker over stdin.
-3. Worker runs PaddleOCR and returns text/confidence JSON over stdout.
+3. Worker runs the configured OCR engine (default: Tesseract) and returns text/confidence JSON over stdout.
 4. Controller merges OCR text into chunk content if available.
 
 ### OCR controls
 
 Environment variables include:
 
-- `ENABLE_PADDLE_OCR`
+- `ENABLE_OCR`
+- `OCR_ENGINE` (`tesseract` or `paddle`)
 - `PADDLE_OCR_USE_GPU`
 - `PADDLE_OCR_LANG`
 - `PADDLE_OCR_MIN_CONFIDENCE`
@@ -404,6 +405,8 @@ High-impact variables:
   - `RETRIEVAL_MODE`
   - `RERANK_TOP_N`
 - OCR:
+  - `ENABLE_OCR`
+  - `OCR_ENGINE`
   - `PADDLE_OCR_USE_GPU`
   - `PADDLE_OCR_MIN_CONFIDENCE`
   - `PDF_RENDER_DPI`

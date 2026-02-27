@@ -1,22 +1,38 @@
-fastapi==0.115.8
-uvicorn[standard]==0.30.6
-python-multipart==0.0.9
-pydantic==2.8.2
-python-dotenv==1.0.1
-numpy==1.26.4
-pillow==10.4.0
-pymupdf==1.24.9
-python-pptx==0.6.23
-python-docx==1.1.2
+fastapi==0.133.1
+uvicorn[standard]==0.41.0
+python-multipart==0.0.22
+pydantic==2.12.5
+python-dotenv==1.2.1
+numpy==2.4.2
+pillow==12.1.1
+pymupdf==1.27.1
+python-pptx==1.0.2
+python-docx==1.2.0
 openpyxl==3.1.5
-xlrd==2.0.1
-beautifulsoup4==4.12.3
-striprtf==0.0.26
-sentence-transformers==3.0.1
-openai>=1.54.0
-gdown>=5.2.0
-psycopg[binary]>=3.2.0,<3.3
-paddleocr>=2.7.3,<3.0
-opencv-python-headless==4.10.0.84
-networkx==3.3
-ultralytics==8.4.14
+xlrd==2.0.2
+beautifulsoup4==4.14.3
+striprtf==0.0.29
+sentence-transformers==5.2.3
+torch==2.10.0
+transformers==5.2.0
+openai==2.24.0
+httpx==0.28.1
+PyYAML==6.0.3
+gdown==5.2.1
+psycopg[binary]==3.3.3
+pytesseract==0.3.13
+opencv-python-headless==4.13.0.92
+opencv-python==4.13.0.92
+opencv-contrib-python==4.13.0.92
+networkx==3.6.1
+ultralytics==8.4.18
+
+# Optional Paddle OCR stack (not needed for default tesseract setup):
+# paddleocr==3.4.0
+# paddlepaddle==3.3.0
+# paddlepaddle-gpu==2.6.2
+#
+# PaddleOCR currently pulls paddlex with strict pins:
+# - PyYAML==6.0.2
+# - opencv-contrib-python==4.10.0.84
+# If enabling paddle, adjust these pins accordingly.

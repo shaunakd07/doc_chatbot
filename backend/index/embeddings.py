@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import numpy as np
 from openai import OpenAI
 from sentence_transformers import SentenceTransformer
@@ -19,6 +21,8 @@ class Embedder:
         self.model_name = model_name
         self.model = None
         self.client = None
+        self.openai_batch_size = max(1, int(os.getenv("OPENAI_EMBED_BATCH_SIZE", "96")))
+        self.local_batch_size = max(1, int(os.getenv("LOCAL_EMBED_BATCH_SIZE", "64")))
         if self.provider == "openai":
             if not openai_api_key:
                 raise RuntimeError("OPENAI_API_KEY is required when EMBED_PROVIDER=openai.")
@@ -38,14 +42,39 @@ class Embedder:
     def embed_texts(self, texts: list[str]) -> np.ndarray:
         if not texts:
             return np.zeros((0, 1), dtype="float32")
+
+        unique_texts: list[str] = []
+        unique_lookup: dict[str, int] = {}
+        remap: list[int] = []
+        for raw in texts:
+            text = str(raw or "")
+            existing = unique_lookup.get(text)
+            if existing is None:
+                existing = len(unique_texts)
+                unique_lookup[text] = existing
+                unique_texts.append(text)
+            remap.append(existing)
+
         if self.provider == "openai":
             assert self.client is not None
-            response = self.client.embeddings.create(model=self.model_name, input=texts)
-            vectors = np.asarray([row.embedding for row in response.data], dtype="float32")
-            return self._normalize(vectors).astype("float32")
+            unique_vectors: list[list[float]] = []
+            for start in range(0, len(unique_texts), self.openai_batch_size):
+                batch = unique_texts[start : start + self.openai_batch_size]
+                response = self.client.embeddings.create(model=self.model_name, input=batch)
+                unique_vectors.extend(row.embedding for row in response.data)
+            vectors_unique = self._normalize(np.asarray(unique_vectors, dtype="float32")).astype("float32")
+            return vectors_unique[np.asarray(remap, dtype=np.int64)]
+
         assert self.model is not None
-        vectors = self.model.encode(texts, normalize_embeddings=True, device=self.device)
-        return np.asarray(vectors, dtype="float32")
+        vectors_unique = self.model.encode(
+            unique_texts,
+            normalize_embeddings=True,
+            device=self.device,
+            batch_size=self.local_batch_size,
+            show_progress_bar=False,
+        )
+        vectors = np.asarray(vectors_unique, dtype="float32")
+        return vectors[np.asarray(remap, dtype=np.int64)]
 
     def embed_query(self, text: str) -> np.ndarray:
         if self.provider == "openai":

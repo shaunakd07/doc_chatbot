@@ -13,6 +13,7 @@ htmlcov/
 
 # Virtual environments
 .venv/
+.venv*/
 venv/
 env/
 ENV/
@@ -27,6 +28,7 @@ ENV/
 
 # Project runtime data (uploads, processed artifacts, local DB/index)
 data/
+harness_runs/
 
 # Large local datasets / media dumps
 spdocvqa_images/
