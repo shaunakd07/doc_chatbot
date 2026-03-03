@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 import json
 import logging
 import shutil
@@ -9,7 +8,7 @@ import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Request, UploadFile
+from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
@@ -90,26 +89,6 @@ def _validate_doc_scope(doc_ids: list[str]) -> tuple[list[str] | None, str | Non
         return None, f"Document(s) are not ready: {', '.join(not_ready[:5])}"
 
     return cleaned, None
-
-
-def _request_uploader_metadata(request: Request) -> dict:
-    headers = request.headers
-    raw_email = str(headers.get("x-user-email", "") or "").strip()
-    raw_role = str(headers.get("x-user-role", "") or "").strip()
-    raw_type = str(headers.get("x-user-type", "") or "").strip().lower()
-    collaborator_type = str(headers.get("x-collaborator-type", "") or "").strip().lower()
-    if collaborator_type not in {"internal", "external"}:
-        collaborator_type = ""
-    if raw_type not in {"human", "service"}:
-        raw_type = ""
-    return {
-        "id": str(headers.get("x-user-id", "") or "").strip(),
-        "name": str(headers.get("x-user-name", "") or "").strip(),
-        "email": raw_email,
-        "role": raw_role,
-        "type": raw_type,
-        "collaborator_type": collaborator_type,
-    }
 
 
 def _initialize_app_state(app: FastAPI) -> None:
@@ -278,16 +257,8 @@ def get_document_diagram_graphs(doc_id: str) -> JSONResponse:
 
 
 @app.post("/api/documents")
-def upload_document(request: Request, file: UploadFile = File(...)) -> JSONResponse:
-    uploader = _request_uploader_metadata(request)
-    tenant_id = str(request.headers.get("x-tenant-id", "") or "").strip() or config.DEFAULT_TENANT_ID
-    doc_id = create_document_record(
-        file.filename,
-        source_system="upload",
-        source_uri=file.filename,
-        tenant_id=tenant_id,
-        uploader=uploader,
-    )
+def upload_document(file: UploadFile = File(...)) -> JSONResponse:
+    doc_id = create_document_record(file.filename)
     try:
         destination = safe_path_for_upload(file.filename, doc_id)
         with destination.open("wb") as buffer:
@@ -314,9 +285,8 @@ def upload_document(request: Request, file: UploadFile = File(...)) -> JSONRespo
                 "ingest_stage": "failed",
                 "ingest_message": "Ingestion queue submission failed",
                 "ingest_error": str(exc)[:800],
-                "updated_at": datetime.now(timezone.utc).isoformat(),
             },
-            merge_metadata=True,
+            merge_metadata=False,
         )
         return JSONResponse({"error": f"Failed to queue ingestion: {exc}"}, status_code=500)
 
@@ -324,15 +294,13 @@ def upload_document(request: Request, file: UploadFile = File(...)) -> JSONRespo
 
 
 @app.post("/api/documents/drive")
-def import_drive_folder(request: DriveRequest, http_request: Request) -> JSONResponse:
+def import_drive_folder(request: DriveRequest) -> JSONResponse:
     import gdown
     import tempfile
     
     url = request.url.strip()
     if not url:
         return JSONResponse({"error": "No URL provided"}, status_code=400)
-    uploader = _request_uploader_metadata(http_request)
-    tenant_id = str(http_request.headers.get("x-tenant-id", "") or "").strip() or config.DEFAULT_TENANT_ID
 
     temp_dir = Path(tempfile.mkdtemp(prefix="doc_chat_drive_"))
     try:
@@ -344,14 +312,7 @@ def import_drive_folder(request: DriveRequest, http_request: Request) -> JSONRes
         count = 0
         for p in temp_dir.rglob("*"):
             if p.is_file() and not p.name.startswith("."):
-                relative = str(p.relative_to(temp_dir)).replace("\\", "/")
-                doc_id = create_document_record(
-                    relative or p.name,
-                    source_system="google_drive",
-                    source_uri=f"{url}#{relative}" if relative else url,
-                    tenant_id=tenant_id,
-                    uploader=uploader,
-                )
+                doc_id = create_document_record(p.name)
                 destination = safe_path_for_upload(p.name, doc_id)
                 shutil.copy2(p, destination)
                 app.state.ingestion_queue.submit(

@@ -343,6 +343,40 @@ function addMessage(text, role = "assistant") {
   chatLog.scrollTop = chatLog.scrollHeight;
 }
 
+function addThinkingIndicator() {
+  const div = document.createElement("div");
+  div.className = "message assistant thinking-message";
+
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  meta.textContent = "assistant";
+
+  const indicator = document.createElement("div");
+  indicator.className = "thinking-indicator";
+  indicator.setAttribute("aria-label", "Thinking...");
+  indicator.setAttribute("role", "status");
+
+  const text = "Thinking...";
+  [...text].forEach((char, index) => {
+    const span = document.createElement("span");
+    span.className = "thinking-letter";
+    span.style.setProperty("--thinking-index", String(index));
+    span.textContent = char;
+    indicator.appendChild(span);
+  });
+
+  div.appendChild(meta);
+  div.appendChild(indicator);
+  chatLog.appendChild(div);
+  chatLog.scrollTop = chatLog.scrollHeight;
+  return div;
+}
+
+function removeThinkingIndicator(indicatorEl) {
+  if (!indicatorEl || !indicatorEl.parentNode) return;
+  indicatorEl.parentNode.removeChild(indicatorEl);
+}
+
 function escapeHtml(value) {
   return String(value || "")
     .replace(/&/g, "&amp;")
@@ -492,6 +526,7 @@ sendBtn.addEventListener("click", async () => {
   addMessage(message, "user");
   chatInput.value = "";
   const includeSummaries = !!includeDocSummaries?.checked;
+  const thinkingIndicator = addThinkingIndicator();
   try {
     const res = await fetch("/api/chat", {
       method: "POST",
@@ -507,8 +542,10 @@ sendBtn.addEventListener("click", async () => {
       throw new Error(data.error || `Chat failed (${res.status})`);
     }
     const responseIncludeSummaries = data.include_document_summaries !== false;
+    removeThinkingIndicator(thinkingIndicator);
     addMessage(renderAssistantResponse(data.answer, data.sources || [], responseIncludeSummaries));
   } catch (error) {
+    removeThinkingIndicator(thinkingIndicator);
     addMessage(`Chat failed: ${error.message}`, "assistant");
   }
 });

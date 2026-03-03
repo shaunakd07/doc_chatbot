@@ -10,28 +10,21 @@
     <div class="bg"></div>
     <main class="shell">
       <header class="hero">
-        <div>
-          <h1>Doc Chatbot</h1>
-          <p>Local multimodal model</p>
-        </div>
+        <h1>Doc Chatbot</h1>
       </header>
 
       <section class="panel upload">
-        <div>
-          <h2>Upload documents</h2>
-          <p>PDF, PPTX, images, or text. Scanned PDFs will run OCR.</p>
-        </div>
         <div class="upload-controls">
           <input type="file" id="fileInput" multiple />
           <button id="uploadBtn">Upload Files</button>
           <input type="file" id="folderInput" webkitdirectory directory multiple style="display: none;" />
           <button id="uploadFolderBtn">Upload Folder</button>
-          <span id="uploadMsg"></span>
         </div>
-        <div class="upload-controls" style="margin-top: 1rem;">
-          <input type="text" id="driveUrlInput" placeholder="Paste Google Drive Folder URL..." style="flex: 1; padding: 0.5rem; border-radius: 4px; border: 1px solid var(--border);" />
+        <div class="upload-controls drive-controls">
+          <input type="text" id="driveUrlInput" placeholder="Paste Google Drive Folder URL..." />
           <button id="driveImportBtn">Import from Drive</button>
         </div>
+        <span id="uploadMsg" class="upload-msg"></span>
       </section>
 
       <section class="workspace" id="workspace">

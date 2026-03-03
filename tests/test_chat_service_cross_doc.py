@@ -269,6 +269,263 @@ class ChatServiceCrossDocTests(unittest.TestCase):
         self.assertTrue(scoped_ids)
         self.assertEqual("doc-invoice", scoped_ids[0])
 
+    def test_count_intent_uses_document_metadata_without_retrieval(self) -> None:
+        route = {
+            "task_type": "metadata_query",
+            "needs_cross_doc": True,
+            "needs_image_reasoning": False,
+            "retrieval_plan": {"strategy": "hybrid", "top_k": 6, "per_doc_limit": 2},
+            "analysis_plan": {"metadata_operation": "count", "metadata_filters": {"doc_type": "nda"}},
+            "confidence": 0.40,
+        }
+        retrieval = StubRetrieval(
+            balanced_chunks=[_chunk("b1", "doc-a", "unused", 0.2)],
+            search_chunks=[_chunk("s1", "doc-a", "unused", 0.2)],
+        )
+        service = ChatService(retrieval, model=None, enable_vlm=False, router=StubRouter(route))
+        fake_docs = [
+            {
+                "id": "doc-nda-1",
+                "filename": "contracts/NDA_Alpha.pdf",
+                "status": "ready",
+                "created_at": "2026-01-01",
+                "metadata": {"doc_type": "nda", "doc_type_confidence": 0.91, "auto_tags": ["nda", "agreement"]},
+            },
+            {
+                "id": "doc-nda-2",
+                "filename": "contracts/NDA_Beta.docx",
+                "status": "ready",
+                "created_at": "2026-01-01",
+                "metadata": {"doc_type": "nda", "doc_type_confidence": 0.88, "auto_tags": ["nda"]},
+            },
+            {
+                "id": "doc-po-1",
+                "filename": "purchasing/PO_2024_01.pdf",
+                "status": "ready",
+                "created_at": "2026-01-01",
+                "metadata": {"doc_type": "purchase_order", "doc_type_confidence": 0.86, "auto_tags": ["purchase order"]},
+            },
+        ]
+
+        with patch("backend.services.chat_service.storage.list_documents", return_value=fake_docs):
+            response = service.answer("How many NDA documents are there?", doc_ids=None, top_k=5)
+
+        self.assertEqual("count", response["intent"])
+        self.assertIn("2", response["answer"])
+        self.assertFalse(retrieval.calls)
+        self.assertTrue(response["sources"])
+
+    def test_count_intent_can_match_filename_focus_terms(self) -> None:
+        route = {
+            "task_type": "metadata_query",
+            "needs_cross_doc": True,
+            "needs_image_reasoning": False,
+            "retrieval_plan": {"strategy": "hybrid", "top_k": 6, "per_doc_limit": 2},
+            "analysis_plan": {"metadata_operation": "count", "metadata_filters": {"target_document": "lakerunner"}},
+            "confidence": 0.31,
+        }
+        retrieval = StubRetrieval(balanced_chunks=[], search_chunks=[])
+        service = ChatService(retrieval, model=None, enable_vlm=False, router=StubRouter(route))
+        fake_docs = [
+            {
+                "id": "d1",
+                "filename": "LakeRunner/Lakerunner_updated_with_licensing_multitenant 1.pptx",
+                "status": "ready",
+                "created_at": "2026-01-01",
+                "metadata": {"doc_type": "presentation", "doc_type_confidence": 0.72, "auto_tags": ["lakerunner"]},
+            },
+            {
+                "id": "d2",
+                "filename": "LakeRunner/LakeRunner.pptx",
+                "status": "ready",
+                "created_at": "2026-01-01",
+                "metadata": {"doc_type": "presentation", "doc_type_confidence": 0.70, "auto_tags": ["lakerunner"]},
+            },
+            {
+                "id": "d3",
+                "filename": "LakeRunner/LakeRunner.pdf",
+                "status": "ready",
+                "created_at": "2026-01-01",
+                "metadata": {"doc_type": "report", "doc_type_confidence": 0.44, "auto_tags": ["lakerunner"]},
+            },
+            {
+                "id": "d4",
+                "filename": "LakeRunner/Lakerunner license.xlsx",
+                "status": "ready",
+                "created_at": "2026-01-01",
+                "metadata": {"doc_type": "spreadsheet", "doc_type_confidence": 0.66, "auto_tags": ["lakerunner", "license"]},
+            },
+            {
+                "id": "d5",
+                "filename": "LakeRunner/Airtel Cloud Prep.pptx",
+                "status": "ready",
+                "created_at": "2026-01-01",
+                "metadata": {"doc_type": "presentation", "doc_type_confidence": 0.63, "auto_tags": ["airtel", "lakerunner"]},
+            },
+            {
+                "id": "d6",
+                "filename": "LakeRunner/Airtel Cloud PPT 1.pptx",
+                "status": "ready",
+                "created_at": "2026-01-01",
+                "metadata": {"doc_type": "presentation", "doc_type_confidence": 0.62, "auto_tags": ["airtel", "lakerunner"]},
+            },
+        ]
+
+        with patch("backend.services.chat_service.storage.list_documents", return_value=fake_docs):
+            response = service.answer("How many Lakerunner documents are there?", doc_ids=None, top_k=5)
+
+        self.assertEqual("count", response["intent"])
+        self.assertIn("6", response["answer"])
+        self.assertFalse(retrieval.calls)
+
+    def test_metadata_grounding_infers_excel_filter_without_router_filter(self) -> None:
+        route = {
+            "task_type": "metadata_query",
+            "needs_cross_doc": True,
+            "needs_image_reasoning": False,
+            "retrieval_plan": {"strategy": "hybrid", "top_k": 6, "per_doc_limit": 2},
+            "analysis_plan": {"metadata_operation": "count", "metadata_filters": {}},
+            "expected_answer_type": "count",
+            "confidence": 0.42,
+        }
+        retrieval = StubRetrieval(balanced_chunks=[], search_chunks=[])
+        service = ChatService(retrieval, model=None, enable_vlm=False, router=StubRouter(route))
+        fake_docs = [
+            {"id": "d1", "filename": "LakeRunner/LakeRunner.pptx", "status": "ready", "created_at": "2026-01-01", "metadata": {"doc_type": "presentation"}},
+            {"id": "d2", "filename": "LakeRunner/LakeRunner.pdf", "status": "ready", "created_at": "2026-01-01", "metadata": {"doc_type": "report"}},
+            {"id": "d3", "filename": "LakeRunner/Lakerunner license.xlsx", "status": "ready", "created_at": "2026-01-01", "metadata": {"doc_type": "spreadsheet"}},
+        ]
+        with patch("backend.services.chat_service.storage.list_documents", return_value=fake_docs):
+            response = service.answer("How many excel files are there?", doc_ids=None, top_k=5)
+
+        self.assertEqual("count", response["intent"])
+        self.assertIn("1", response["answer"])
+        self.assertIn("doc_type=excel", response["answer"].lower())
+        self.assertFalse(retrieval.calls)
+
+    def test_person_answer_type_rewrites_list_to_last_modified_query(self) -> None:
+        route = {
+            "task_type": "metadata_query",
+            "needs_cross_doc": True,
+            "needs_image_reasoning": False,
+            "retrieval_plan": {"strategy": "hybrid", "top_k": 6, "per_doc_limit": 2},
+            "analysis_plan": {"metadata_operation": "list", "metadata_filters": {}},
+            "expected_answer_type": "person",
+            "confidence": 0.47,
+        }
+        retrieval = StubRetrieval(balanced_chunks=[], search_chunks=[])
+        service = ChatService(retrieval, model=None, enable_vlm=False, router=StubRouter(route))
+        fake_docs = [
+            {
+                "id": "a1",
+                "filename": "LakeRunner/Airtel Cloud Prep.pptx",
+                "status": "ready",
+                "created_at": "2026-01-01",
+                "metadata": {"last_modified_by": "Sachin Dabir", "doc_type": "presentation"},
+            },
+            {
+                "id": "a2",
+                "filename": "LakeRunner/Airtel Cloud PPT 1.pptx",
+                "status": "ready",
+                "created_at": "2026-01-01",
+                "metadata": {"last_modified_by": "Sachin Dabir", "doc_type": "presentation"},
+            },
+        ]
+        with patch("backend.services.chat_service.storage.list_documents", return_value=fake_docs):
+            response = service.answer("Who last modified the Airtel pptx", doc_ids=None, top_k=5)
+
+        self.assertEqual("metadata_query", response["intent"])
+        self.assertIn("multiple documents matching", response["answer"].lower())
+        self.assertIn("Airtel Cloud Prep.pptx", response["answer"])
+        self.assertFalse(retrieval.calls)
+
+    def test_plain_qa_with_list_answer_type_does_not_switch_to_metadata_query(self) -> None:
+        route = {
+            "task_type": "qa",
+            "needs_cross_doc": False,
+            "needs_image_reasoning": False,
+            "retrieval_plan": {"strategy": "hybrid", "top_k": 6, "per_doc_limit": 2},
+            "analysis_plan": {},
+            "expected_answer_type": "list",
+            "confidence": 0.82,
+        }
+        retrieval = StubRetrieval(
+            balanced_chunks=[],
+            search_chunks=[_chunk("q1", "doc-a", "Lakerunner provides cloud migration and managed support services to Airtel.", 0.91)],
+        )
+        service = ChatService(retrieval, model=None, enable_vlm=False, router=StubRouter(route))
+        fake_docs = [
+            {"id": "doc-a", "filename": "LakeRunner/Airtel Cloud Prep.pptx", "status": "ready", "created_at": "2026-01-01", "metadata": {}},
+        ]
+        with patch("backend.services.chat_service.storage.list_documents", return_value=fake_docs):
+            response = service.answer("What services does Lakerunner provide to Airtel", doc_ids=None, top_k=5)
+
+        self.assertEqual("qa", response["intent"])
+        self.assertTrue(any(call[0] == "search" for call in retrieval.calls))
+        self.assertNotIn("document(s) in the current metadata query scope", response["answer"].lower())
+
+    def test_metadata_zero_matches_falls_back_to_semantic_evidence(self) -> None:
+        route = {
+            "task_type": "metadata_query",
+            "needs_cross_doc": True,
+            "needs_image_reasoning": False,
+            "retrieval_plan": {"strategy": "hybrid", "top_k": 6, "per_doc_limit": 2},
+            "analysis_plan": {"metadata_operation": "count", "metadata_filters": {"author": "unknown-user"}},
+            "expected_answer_type": "count",
+            "confidence": 0.65,
+        }
+        retrieval = StubRetrieval(
+            balanced_chunks=[
+                _chunk("m1", "doc-a", "NDA executed on 4 Jan 2018 between Prudential and Ashnik.", 0.91),
+            ],
+            search_chunks=[],
+        )
+        service = ChatService(retrieval, model=None, enable_vlm=False, router=StubRouter(route))
+        fake_docs = [
+            {
+                "id": "doc-a",
+                "filename": "contracts/nda_2018_prudential_ashnik.pdf",
+                "status": "ready",
+                "created_at": "2026-01-01",
+                "metadata": {"doc_type": "nda", "author": "Ashnik"},
+            }
+        ]
+        with patch("backend.services.chat_service.storage.list_documents", return_value=fake_docs):
+            response = service.answer("Which NDAs were signed in 2018?", doc_ids=None, top_k=5)
+
+        self.assertIn("partial evidence", response["answer"].lower())
+        self.assertTrue(any(call[0] == "search_balanced" for call in retrieval.calls))
+
+    def test_count_task_without_count_signal_is_treated_as_list_metadata_query(self) -> None:
+        route = {
+            "task_type": "count",
+            "needs_cross_doc": True,
+            "needs_image_reasoning": False,
+            "retrieval_plan": {"strategy": "balanced", "top_k": 8, "per_doc_limit": 2},
+            "analysis_plan": {},
+            "expected_answer_type": "unknown",
+            "confidence": 0.62,
+        }
+        retrieval = StubRetrieval(
+            balanced_chunks=[_chunk("m2", "doc-a", "NDA executed on 4 Jan 2018 between Prudential and Ashnik.", 0.89)],
+            search_chunks=[],
+        )
+        service = ChatService(retrieval, model=None, enable_vlm=False, router=StubRouter(route))
+        fake_docs = [
+            {
+                "id": "doc-a",
+                "filename": "contracts/nda_2018_prudential_ashnik.pdf",
+                "status": "ready",
+                "created_at": "2026-01-01",
+                "metadata": {"doc_type": "nda"},
+            }
+        ]
+        with patch("backend.services.chat_service.storage.list_documents", return_value=fake_docs):
+            response = service.answer("Which NDAs were signed in 2018?", doc_ids=None, top_k=5)
+
+        self.assertEqual("metadata_query", response["intent"])
+        self.assertNotIn("there are", response["answer"].lower())
+
     def test_trend_analysis_builds_tag_based_classes_and_enforces_numeric_plan(self) -> None:
         route = {
             "task_type": "trend_analysis",

@@ -1,0 +1,786 @@
+Command failed: 2026-03-03T19:48:53.586626Z ERROR code_core::codex::streaming: MCP server `contexplus` failed to start: server 'contexplus': failed to spawn MCP server `contexplus` using command `contexplus`: program not found
+[2026-03-03T19:48:53] OpenAI Codex v0.0.0 (research preview)
+[2026-03-03T19:48:53] binary: C:\Users\shaun\AppData\Local\just-every\code\0.6.70\code-x86_64-pc-windows-msvc.exe
+--------
+workdir: D:\shaun\Projects\doc_chatbot
+model: gpt-5.3-codex
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: xhigh
+reasoning summaries: auto
+--------
+[2026-03-03T19:48:53] User instructions:
+Context: Need deterministic scoring and auditability for multi-agent bug tournament.
+
+Agent: Design a referee agent that adjudicates bug-finder and disprove-bug claims and tracks scores. Referee scoring: +1 for correct adjudication, -1 for incorrect. Define adjudication protocol, evidence standards, tie-breakers, replay/audit logging, and calibration metrics. Include recommended data model and workflow integration with test harness artifacts.
+
+Desired output: Referee protocol and scoring system design
+
+Files to consider: D:/shaun/Projects/doc_chatbot/tests/harness, D:/shaun/Projects/doc_chatbot/documentation/test_harness.md
+
+[Running in read-only mode - no modifications allowed]
+[2026-03-03T19:48:53] ERROR: MCP server `contexplus` failed to start: server 'contexplus': failed to spawn MCP server `contexplus` using command `contexplus`: program not found
+
+[2026-03-03T19:49:00] thinking
+
+**Clarifying context tool usage**
+[2026-03-03T19:49:00] exec powershell.exe -NoProfile -Command 'Get-ChildItem -Path . -Force | Select-Object Name,Mode,Length' in D:\shaun\Projects\doc_chatbot
+[2026-03-03T19:49:00] powershell.exe -NoProfile -Command 'Get-ChildItem -Path . -Force | Select-Object Name,Mode,Length' succeeded in 173ms:
+
+Name                                      Mode   Length    
+----                                      ----   ------    
+--help                                    d-----           
+.code                                     d-----           
+.git                                      d--h--           
+.mcp_data                                 d-----           
+.pytest_cache                             d-----           
+.venv                                     d-----           
+.venv312                                  d-----           
+.vscode                                   d-----           
+backend                                   d-----           
+data                                      d-----           
+diagrams                                  d-----           
+documentation                             d-----           
+frontend                                  d-----           
+harness_runs                              d-----           
+icons                                     d-----           
+scripts                                   d-----           
+tests                                     d-----           
+[2026-03-03T19:49:00] tokens used: 7,597
+
+[2026-03-03T19:49:02] thinking
+
+**Identifying test harness files**
+[2026-03-03T19:49:02] exec powershell.exe -NoProfile -Command 'Get-ChildItem -Path tests/harness -Recurse -File | Select-Object FullName' in D:\shaun\Projects\doc_chatbot
+[2026-03-03T19:49:03] powershell.exe -NoProfile -Command 'Get-ChildItem -Path tests/harness -Recurse -File | Select-Object FullName' succeeded in 170ms:
+
+FullName                                                                            
+--------                                                                            
+D:\shaun\Projects\doc_chatbot\tests\harness\api_client.py                           
+D:\shaun\Projects\doc_chatbot\tests\harness\assertions.py                           
+D:\shaun\Projects\doc_chatbot\tests\harness\catalog.py                              
+D:\shaun\Projects\doc_chatbot\tests\harness\cli.py                                  
+D:\shaun\Projects\doc_chatbot\tests\harness\config.py                               
+D:\shaun\Projects\doc_chatbot\tests\harness\db_inspector.py                         
+D:\shaun\Projects\doc_chatbot\tests\harness\evidence.py                             
+D:\shaun\Projects\doc_chatbot\tests\harness\log_capture.py                          
+D:\shaun\Projects\doc_chatbot\tests\harness\runner.py                               
+D:\shaun\Projects\doc_chatbot\tests\harness\types.py                                
+D:\shaun\Projects\doc_chatbot\tests\harness\__init__.py                             
+D:\shaun\Projects\doc_chatbot\tests\harness\scenarios\cases.yaml                    
+D:\shaun\Projects\doc_chatbot\tests\harness\scenarios\datasets.yaml                 
+D:\shaun\Projects\doc_chatbot\tests\harness\scenarios\profiles.yaml                 
+D:\shaun\Projects\doc_chatbot\tests\harness\__pycache__\api_client.cpython-312.pyc  
+D:\shaun\Projects\doc_chatbot\tests\harness\__pycache__\assertions.cpython-312.pyc  
+D:\shaun\Projects\doc_chatbot\tests\harness\__pycache__\catalog.cpython-312.pyc     
+[2026-03-03T19:49:03] tokens used: 8,202
+
+[2026-03-03T19:49:05] thinking
+
+**Planning partial file inspection**
+[2026-03-03T19:49:07] exec powershell.exe -NoProfile -Command 'Get-Item documentation/test_harness.md, tests/harness/*.py | Select-Object Name,Length' in D:\shaun\Projects\doc_chatbot
+[2026-03-03T19:49:07] powershell.exe -NoProfile -Command 'Get-Item documentation/test_harness.md, tests/harness/*.py | Select-Object Name,Length' succeeded in 166ms:
+
+Name            Length
+----            ------
+test_harness.md   5054
+api_client.py     3357
+assertions.py    10574
+catalog.py        2356
+cli.py            6359
+config.py         7886
+db_inspector.py   8268
+evidence.py       2694
+log_capture.py    2286
+runner.py        16137
+types.py          2699
+__init__.py         62
+
+
+[2026-03-03T19:49:07] tokens used: 9,156
+[2026-03-03T19:49:09] exec powershell.exe -NoProfile -Command 'Get-Content -Path documentation/test_harness.md' in D:\shaun\Projects\doc_chatbot
+[2026-03-03T19:49:09] powershell.exe -NoProfile -Command 'Get-Content -Path documentation/test_harness.md' succeeded in 133ms:
+# Test Harness Stack
+
+## Purpose
+
+This harness operationalizes the test strategy in [tests.md](D:/shaun/Projects/doc_chatbot/docs/tests.md) without hardcoding one-off scripts.
+
+It supports:
+
+1. API-driven ingestion/retrieval test execution.
+2. DB integrity inspection (SQLite or Postgres).
+3. Deterministic test corpus selection from `test_docs/`.
+4. Per-case evidence capture in machine-readable artifacts.
+5. Dry-run planning mode (no API calls) and execute mode.
+
+## Prerequisites
+
+1. Python environment with `requirements.txt` installed (harness uses `httpx` and `PyYAML` directly).
+2. `test_docs/` populated with the corpus referenced by `tests/harness/scenarios/datasets.yaml`.
+3. For `execute` mode: running backend API (`/api/health`, `/api/documents`, `/api/chat`) and configured DB access for inspector checks.
+
+[2026-03-03T19:49:09] tokens used: 9,545
+
+[2026-03-03T19:49:13] thinking
+
+**Planning targeted code inspection**
+[2026-03-03T19:49:14] tokens used: 11,332
+
+[2026-03-03T19:49:18] thinking
+
+**Shifting to PowerShell text search**
+[2026-03-03T19:49:19] tokens used: 11,622
+
+[2026-03-03T19:49:21] thinking
+
+**Planning command filtering**
+[2026-03-03T19:49:22] tokens used: 11,958
+
+[2026-03-03T19:49:25] thinking
+
+**Testing allowed PowerShell cmdlets**
+[2026-03-03T19:49:26] exec powershell.exe -NoProfile -Command 'Get-Content -Path tests/harness/types.py' in D:\shaun\Projects\doc_chatbot
+[2026-03-03T19:49:26] powershell.exe -NoProfile -Command 'Get-Content -Path tests/harness/types.py' succeeded in 133ms:
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
+
+
+@dataclass
+class FileSelector:
+    kind: str
+    path: Optional[str] = None
+    root: Optional[str] = None
+    pattern: Optional[str] = None
+    n: Optional[int] = None
+    paths: List[str] = field(default_factory=list)
+    recursive: bool = True
+
+
+@dataclass
+class ChatProbe:
+    prompt: str
+[2026-03-03T19:49:26] tokens used: 12,196
+[2026-03-03T19:49:28] exec powershell.exe -NoProfile -Command 'Get-Content -Path tests/harness/evidence.py' in D:\shaun\Projects\doc_chatbot
+[2026-03-03T19:49:28] powershell.exe -NoProfile -Command 'Get-Content -Path tests/harness/evidence.py' succeeded in 144ms:
+from __future__ import annotations
+
+import json
+from dataclasses import asdict, is_dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _to_jsonable(payload: Any) -> Any:
+    if is_dataclass(payload):
+        return asdict(payload)
+    if isinstance(payload, dict):
+        return {str(k): _to_jsonable(v) for k, v in payload.items()}
+    if isinstance(payload, list):
+        return [_to_jsonable(v) for v in payload]
+[2026-03-03T19:49:28] tokens used: 13,231
+
+[2026-03-03T19:49:30] thinking
+
+**Planning partial file read**
+[2026-03-03T19:49:30] exec powershell.exe -NoProfile -Command 'Get-Content -Path tests/harness/runner.py' in D:\shaun\Projects\doc_chatbot
+[2026-03-03T19:49:30] powershell.exe -NoProfile -Command 'Get-Content -Path tests/harness/runner.py' succeeded in 141ms:
+from __future__ import annotations
+
+import traceback
+from datetime import datetime, timezone
+from pathlib import Path
+import time
+from typing import Any, Dict, List, Optional, Tuple
+
+from .api_client import ApiClient
+from .assertions import AssertionEngine
+from .catalog import resolve_dataset
+from .db_inspector import DBInspector
+from .evidence import EvidenceWriter, utc_now_iso
+from .types import FileSelector, Profile, RunSummary, TestCase
+
+
+TERMINAL_DOC_STATUSES = {"ready", "failed"}
+
+
+def _now_utc() -> datetime:
+[2026-03-03T19:49:30] tokens used: 14,267
+
+[2026-03-03T19:49:32] thinking
+
+**Planning assertion engine details**
+[2026-03-03T19:49:32] exec powershell.exe -NoProfile -Command 'Get-Content -Path tests/harness/assertions.py' in D:\shaun\Projects\doc_chatbot
+[2026-03-03T19:49:32] powershell.exe -NoProfile -Command 'Get-Content -Path tests/harness/assertions.py' succeeded in 139ms:
+from __future__ import annotations
+
+from typing import Any, Dict, List
+
+from .types import Condition, TestCase
+
+
+def _status(value: bool) -> str:
+    return "pass" if value else "fail"
+
+
+class AssertionEngine:
+    def evaluate(self, case: TestCase, context: Dict[str, Any]) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for cond in case.checks:
+            try:
+                out.append(self._evaluate_condition(cond, context))
+            except Exception as exc:
+                out.append(
+                    {
+[2026-03-03T19:49:32] tokens used: 18,658
+
+[2026-03-03T19:49:34] thinking
+
+**Considering config and CLI setup**
+[2026-03-03T19:49:34] exec powershell.exe -NoProfile -Command 'Get-Content -Path tests/harness/cli.py' in D:\shaun\Projects\doc_chatbot
+[2026-03-03T19:49:35] powershell.exe -NoProfile -Command 'Get-Content -Path tests/harness/cli.py' succeeded in 183ms:
+from __future__ import annotations
+
+import argparse
+from datetime import datetime, timezone
+from pathlib import Path
+import shlex
+import sys
+from typing import List
+
+from .api_client import ApiClient
+from .config import load_cases, load_dataset_selectors, load_profiles, select_cases
+from .evidence import EvidenceWriter
+from .log_capture import ManagedAppProcess
+from .runner import HarnessRunner
+from .types import RunSummary
+
+
+def _default_run_id(profile: str, mode: str) -> str:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"{stamp}_{profile}_{mode}"
+[2026-03-03T19:49:35] tokens used: 21,766
+
+[2026-03-03T19:49:37] thinking
+
+**Considering data shape inspection**
+[2026-03-03T19:49:37] exec powershell.exe -NoProfile -Command 'Get-Content -Path tests/harness/api_client.py' in D:\shaun\Projects\doc_chatbot
+[2026-03-03T19:49:37] powershell.exe -NoProfile -Command 'Get-Content -Path tests/harness/api_client.py' succeeded in 137ms:
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import httpx
+
+
+class ApiClient:
+    def __init__(self, base_url: str, timeout_sec: float = 120.0) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.client = httpx.Client(
+            base_url=self.base_url,
+            timeout=httpx.Timeout(timeout_sec),
+            headers={"Accept": "application/json"},
+        )
+
+    def close(self) -> None:
+        self.client.close()
+[2026-03-03T19:49:37] tokens used: 23,923
+[2026-03-03T19:49:40] exec powershell.exe -NoProfile -Command 'Get-Content -Path tests/harness/config.py' in D:\shaun\Projects\doc_chatbot
+[2026-03-03T19:49:40] powershell.exe -NoProfile -Command 'Get-Content -Path tests/harness/config.py' succeeded in 142ms:
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Dict, List
+
+from .types import ChatProbe, Condition, FileSelector, Profile, TestCase
+
+
+def _load_yaml(path: Path) -> Dict[str, Any]:
+    try:
+        import yaml  # type: ignore
+    except Exception as exc:  # pragma: no cover - runtime dependency guard
+        raise RuntimeError("PyYAML is required to load harness scenario files.") from exc
+    try:
+        payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise RuntimeError(f"Could not parse YAML file: {path}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"YAML root must be a mapping: {path}")
+    return payload
+[2026-03-03T19:49:40] tokens used: 47,272
+
+[2026-03-03T19:49:43] thinking
+
+**Inspecting test harness artifacts**
+[2026-03-03T19:49:44] exec powershell.exe -NoProfile -Command 'Get-ChildItem -Path harness_runs -Force | Select-Object Name,Mode' in D:\shaun\Projects\doc_chatbot
+[2026-03-03T19:49:44] powershell.exe -NoProfile -Command 'Get-ChildItem -Path harness_runs -Force | Select-Object Name,Mode' succeeded in 169ms:
+
+Name                                       Mode  
+----                                       ----  
+20260227T034738Z_full_automated_dry-run    d-----
+20260227T034805Z_manual_resilience_dry-run d-----
+a007_tesseract_20260225                    d-----
+all_tests_full_automated_20260225          d-----
+dryrun_validation                          d-----
+a007_profile.yaml                          -a----
+
+
+[2026-03-03T19:49:44] tokens used: 50,907
+[2026-03-03T19:49:49] exec powershell.exe -NoProfile -Command 'Get-Content -Path harness_runs/20260227T034738Z_full_automated_dry-run/summary.json' in D:\shaun\Projects\doc_chatbot
+[2026-03-03T19:49:49] powershell.exe -NoProfile -Command 'Get-Content -Path harness_runs/20260227T034738Z_full_automated_dry-run/summary.json' succeeded in 159ms:
+{
+  "run_id": "20260227T034738Z_full_automated_dry-run",
+  "profile": "full_automated",
+  "mode": "dry-run",
+  "selected_cases": 47,
+  "executed_cases": 47,
+  "passed_cases": 0,
+  "failed_cases": 0,
+  "skipped_cases": 47,
+  "started_at": "2026-02-27T03:47:38.294425+00:00",
+  "finished_at": "2026-02-27T03:47:41.026878+00:00",
+  "duration_sec": 2.735
+}
+[2026-03-03T19:49:49] tokens used: 51,294
+
+[2026-03-03T19:49:51] thinking
+
+**Reviewing case snapshot format**
+[2026-03-03T19:49:52] exec powershell.exe -NoProfile -Command 'Get-ChildItem -Path harness_runs/20260227T034738Z_full_automated_dry-run/snapshots/cases | Select-Object -First 3 -ExpandProperty Name' in D:\shaun\Projects\doc_chatbot
+[2026-03-03T19:49:52] powershell.exe -NoProfile -Command 'Get-ChildItem -Path harness_runs/20260227T034738Z_full_automated_dry-run/snapshots/cases | Select-Object -First 3 -ExpandProperty Name' succeeded in 184ms:
+A-001.json
+A-002.json
+A-003.json
+[2026-03-03T19:49:52] tokens used: 51,702
+[2026-03-03T19:49:55] exec powershell.exe -NoProfile -Command 'Get-Content -Path harness_runs/20260227T034738Z_full_automated_dry-run/snapshots/cases/A-001.json' in D:\shaun\Projects\doc_chatbot
+[2026-03-03T19:49:55] powershell.exe -NoProfile -Command 'Get-Content -Path harness_runs/20260227T034738Z_full_automated_dry-run/snapshots/cases/A-001.json' succeeded in 146ms:
+{
+  "case_id": "A-001",
+  "suite": "A",
+  "title": "Single upload lifecycle (PDF)",
+  "status": "skip",
+  "reason": "dry-run",
+  "mode": "dry-run",
+  "automation_level": "full",
+  "datasets": [
+    {
+      "dataset": "canonical_pdf",
+      "count": 1,
+      "sample": [
+        "D:/shaun/Projects/doc_chatbot/test_docs/LakeRunner/LakeRunner.pdf"
+      ]
+    }
+  ],
+  "resolved_files_count": 1,
+  "resolved_files_sample": [
+    "D:/shaun/Projects/doc_chatbot/test_docs/LakeRunner/LakeRunner.pdf"
+[2026-03-03T19:49:55] tokens used: 51,959
+
+[2026-03-03T19:49:57] thinking
+
+**Identifying event timeline need**
+[2026-03-03T19:49:57] exec powershell.exe -NoProfile -Command 'Get-Content -Path harness_runs/20260227T034738Z_full_automated_dry-run/events/timeline.jsonl -TotalCount 10' in D:\shaun\Projects\doc_chatbot
+[2026-03-03T19:49:57] powershell.exe -NoProfile -Command 'Get-Content -Path harness_runs/20260227T034738Z_full_automated_dry-run/events/timeline.jsonl -TotalCount 10' succeeded in 153ms:
+{"time_utc": "2026-02-27T03:47:38+00:00", "event_type": "case_start", "payload": {"case_id": "A-001", "title": "Single upload lifecycle (PDF)"}}
+{"time_utc": "2026-02-27T03:47:38+00:00", "event_type": "case_end", "payload": {"case_id": "A-001", "status": "skip", "duration_sec": 0.0}}
+{"time_utc": "2026-02-27T03:47:38+00:00", "event_type": "case_start", "payload": {"case_id": "A-002", "title": "Single upload lifecycle (PPTX)"}}
+{"time_utc": "2026-02-27T03:47:38+00:00", "event_type": "case_end", "payload": {"case_id": "A-002", "status": "skip", "duration_sec": 0.0}}
+{"time_utc": "2026-02-27T03:47:38+00:00", "event_type": "case_start", "payload": {"case_id": "A-003", "title": "Single upload lifecycle (XLSX)"}}
+{"time_utc": "2026-02-27T03:47:38+00:00", "event_type": "case_end", "payload": {"case_id": "A-003", "status": "skip", "duration_sec": 0.0}}
+{"time_utc": "2026-02-27T03:47:38+00:00", "event_type": "case_start", "payload": {"case_id": "A-004", "title": "Single upload lifecycle (DOCX)"}}
+{"time_utc": "2026-02-27T03:47:38+00:00", "event_type": "case_end", "payload": {"case_id": "A-004", "status": "skip", "duration_sec": 0.0}}
+{"time_utc": "2026-02-27T03:47:38+00:00", "event_type": "case_start", "payload": {"case_id": "A-005", "title": "Single upload lifecycle (JPG image)"}}
+{"time_utc": "2026-02-27T03:47:38+00:00", "event_type": "case_end", "payload": {"case_id": "A-005", "status": "skip", "duration_sec": 0.0}}
+[2026-03-03T19:49:57] tokens used: 52,561
+
+[2026-03-03T19:50:00] thinking
+
+**Planning execution and dry-run checks**
+[2026-03-03T19:50:01] tokens used: 53,435
+
+[2026-03-03T19:50:05] thinking
+
+**Deciding manual inspection approach**
+[2026-03-03T19:50:06] exec powershell.exe -NoProfile -Command 'Get-Content -Path harness_runs/20260227T034805Z_manual_resilience_dry-run/summary.json' in D:\shaun\Projects\doc_chatbot
+[2026-03-03T19:50:06] powershell.exe -NoProfile -Command 'Get-Content -Path harness_runs/20260227T034805Z_manual_resilience_dry-run/summary.json' succeeded in 143ms:
+{
+  "run_id": "20260227T034805Z_manual_resilience_dry-run",
+  "profile": "manual_resilience",
+  "mode": "dry-run",
+  "selected_cases": 2,
+  "executed_cases": 2,
+  "passed_cases": 0,
+  "failed_cases": 0,
+  "skipped_cases": 2,
+  "started_at": "2026-02-27T03:48:05.527138+00:00",
+  "finished_at": "2026-02-27T03:48:06.001138+00:00",
+  "duration_sec": 0.484
+}
+[2026-03-03T19:50:06] tokens used: 53,661
+[2026-03-03T19:50:08] exec powershell.exe -NoProfile -Command 'Get-Content -Path harness_runs/a007_tesseract_20260225/summary.json' in D:\shaun\Projects\doc_chatbot
+[2026-03-03T19:50:08] powershell.exe -NoProfile -Command 'Get-Content -Path harness_runs/a007_tesseract_20260225/summary.json' succeeded in 137ms:
+{
+  "run_id": "a007_tesseract_20260225",
+  "profile": "a007_tesseract",
+  "mode": "execute",
+  "selected_cases": 1,
+  "executed_cases": 1,
+  "passed_cases": 1,
+  "failed_cases": 0,
+  "skipped_cases": 0,
+  "started_at": "2026-02-25T22:39:37.957090+00:00",
+  "finished_at": "2026-02-25T22:40:51.151705+00:00",
+  "duration_sec": 73.188
+}
+[2026-03-03T19:50:08] tokens used: 54,002
+
+[2026-03-03T19:50:15] thinking
+
+**Inspecting test case structure**
+[2026-03-03T19:50:15] exec powershell.exe -NoProfile -Command 'Get-ChildItem -Path harness_runs/a007_tesseract_20260225/snapshots/cases | Select-Object -ExpandProperty Name' in D:\shaun\Projects\doc_chatbot
+[2026-03-03T19:50:15] powershell.exe -NoProfile -Command 'Get-ChildItem -Path harness_runs/a007_tesseract_20260225/snapshots/cases | Select-Object -ExpandProperty Name' succeeded in 169ms:
+A-007.json
+[2026-03-03T19:50:15] tokens used: 54,355
+[2026-03-03T19:50:18] exec powershell.exe -NoProfile -Command 'Get-Content -Path harness_runs/a007_tesseract_20260225/snapshots/cases/A-007.json' in D:\shaun\Projects\doc_chatbot
+[2026-03-03T19:50:18] powershell.exe -NoProfile -Command 'Get-Content -Path harness_runs/a007_tesseract_20260225/snapshots/cases/A-007.json' succeeded in 202ms:
+{
+  "case_id": "A-007",
+  "suite": "A",
+  "title": "Filename handling with spaces and punctuation",
+  "status": "pass",
+  "objective": "Validate safe upload path handling for complex filenames.",
+  "automation_level": "full",
+  "datasets": [
+    {
+      "dataset": "canonical_diagram_png",
+      "count": 1,
+      "sample": [
+        "D:/shaun/Projects/doc_chatbot/test_docs/Intelligent Retrieval System.drawio (2).png"
+      ]
+    },
+    {
+      "dataset": "lakerunner_pptx_multitenant",
+      "count": 1,
+      "sample": [
+        "D:/shaun/Projects/doc_chatbot/test_docs/LakeRunner/Lakerunner_updated_with_licensing_multitenant 1.pptx"
+[2026-03-03T19:50:18] tokens used: 54,539
+
+[2026-03-03T19:50:28] thinking
+
+**Planning line referencing and protocol design**
+[2026-03-03T19:50:28] tokens used: 64,105
+
+[2026-03-03T19:51:05] thinking
+
+**Designing referee agent protocol**
+[2026-03-03T19:51:06] exec powershell.exe -NoProfile -Command 'Get-Content -Path scripts/run_test_harness.py' in D:\shaun\Projects\doc_chatbot
+[2026-03-03T19:51:06] powershell.exe -NoProfile -Command 'Get-Content -Path scripts/run_test_harness.py' succeeded in 169ms:
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+
+def main() -> int:
+    repo_root = Path(__file__).resolve().parents[1]
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    from tests.harness.cli import main as harness_main
+
+    return harness_main()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+[2026-03-03T19:51:06] tokens used: 66,232
+
+[2026-03-03T19:52:25] thinking
+
+**Designing deterministic referee adjudication**
+**Designing comprehensive referee scoring and calibration**
+**Skill note:**
+
+no listed skill directly applies; this is a direct protocol design task.
+
+**Referee Protocol Design**
+
+Reviewed existing harness outputs (`documentation/test_harness.md`) and artifact layouts from `tests/harness/runner.py` and `tests/harness/evidence.py`. Here is a deterministic referee adjudication and scoring design integrating with test harness artifacts.
+
+1. **Protocol Steps**  
+1. Round opens; bug finder submits claims (`T0-T1`).  
+2. Disprover submits counterclaims (`T1-T2`).  
+3. Evidence freeze at `T2`; claims locked.  
+4. Referee adjudicates claims deterministically in lex order by `(case_id, claim_id)`.  
+5. If unresolved or conflicting, trigger deterministic replay (3 runs) for tie-breaking.  
+6. Oracle outcome finalized from replay majority.  
+7. Scoring ledger updated; calibration metrics computed.  
+
+2. **Evidence Standards**  
+- **Tier A:** Structured, direct harness artifacts (e.g., `snapshots/cases/<case_id>.json` checks) — weight 3.  
+- **Tier B:** Derived run-level metrics (e.g., `summary.json`, `api/health.json`) — weight 2.  
+- **Tier C:** Unstructured logs (e.g., `logs/managed_app.log`) — weight 1.  
+- Claims require ≥1 Tier A evidence pointer; otherwise rejected.
+
+3. **Decision Matrix**
+
+| Bug Claim Status     | Disprove Claim Status | Replay Result       | Verdict           | Winner      |  
+|---------------------|----------------------|--------------------|-------------------|-------------|  
+| Supported           | Unsupported          | —                  | BUG_VALID         | Bug finder  |  
+| Unsupported         | Supported            | —                  | BUG_INVALID       | Disprover   |  
+| Supported           | Supported            | —                  | Tie-break chain   | See tie-breakers |  
+| Unsupported         | Unsupported          | —                  | Tie-break chain   | See tie-breakers |  
+| Any Undecidable     | —                    | —                  | Tie-break chain   | See tie-breakers |  
+| —                   | —                    | Replay Major. Bug valid | BUG_VALID       | Bug finder  |  
+| —                   | —                    | Replay Major. Bug invalid | BUG_INVALID  | Disprover   |  
+| —                   | —                    | Replay Inconclusive | INSUFFICIENT_EVIDENCE | Draw    |  
+
+4. **Tie-Breakers (Deterministic Order)**  
+1. Higher evidence tier total support wins.  
+2. Count of independent facts at winning tier.  
+3. Replay majority verdict (3 runs).  
+4. Fallback verdict: `INSUFFICIENT_EVIDENCE` (draw).  
+
+5. **Scoring Formulas**  
+
+```python
+referee_points_i = +1 if referee_verdict_i == oracle_verdict_i else -1
+referee_total_score = sum(referee_points_i for i in adjudications)
+accuracy = (referee_total_score + N) / (2 * N)  # N = settled adjudications
+```
+
+- Tri-state scoring applies for labels: `BUG_VALID`, `BUG_INVALID`, `INSUFFICIENT`.  
+- No zero except while pending oracle result.
+
+6. **Data Model Overview**
+
+| Entity             | Key Fields                                   | Notes                             |  
+|--------------------|----------------------------------------------|----------------------------------|  
+| Claim              | `claim_id`, `run_id`, `case_id`, `side`, `predicate`, `evidence_refs` | Bug finder or disprover claim   |  
+| EvidenceBundle     | `run_id`, `case_id`, `artifact_paths`, `sha256_hashes` | Frozen snapshot per adjudication |  
+| Adjudication       | `adjudication_id`, `claim_id`, `verdict`, `winner`, `confidence`, `tie_breaker`, `rule_trace`, `oracle_status` | Core verdict and audit info     |  
+| OracleOutcome      | `adjudication_id`, `oracle_verdict`, `replay_runs`         | Replay-based ground truth        |  
+| ScoreLedgerEntry   | `adjudication_id`, `referee_id`, `referee_verdict`, `oracle_verdict`, `points`, `cumulative_score`, `prev_hash`, `record_hash` | Tamper-evident scoring ledger   |  
+| CalibrationSnapshot| `timestamp`, `accuracy`, `ece`, `brier`, `overturn_rate`, `determinism_rate` | Periodic referee quality metrics |  
+
+7. **Harness Integration**
+
+- **Inputs:**  
+  - `harness_runs/<run_id>/summary.json` (run-level info)  
+  - `harness_runs/<run_id>/snapshots/run_context.json`  
+  - `harness_runs/<run_id>/snapshots/cases/<case_id>.json` (case evidence)  
+  - `harness_runs/<run_id>/events/timeline.jsonl` (existing event log)  
+  - `harness_runs/<run_id>/api/health.json` (optional infra logs)  
+  - `harness_runs/<run_id>/logs/managed_app.log` (optional)  
+
+- **Outputs (new proposed):**  
+  - `harness_runs/<run_id>/tournament/claims/` (claim JSON files)  
+  - `harness_runs/<run_id>/tournament/disputes/` (disprove claims)  
+  - `harness_runs/<run_id>/tournament/evidence/` (evidence bundles)  
+  - `harness_runs/<run_id>/tournament/adjudications/` (adjudication JSON)  
+  - `harness_runs/<run_id>/tournament/replays/` (replay runs metadata)  
+  - `harness_runs/<run_id>/tournament/scores/ledger.jsonl` (referee scores ledger)  
+  - `harness_runs/<run_id>/tournament/scores/calibration.json` (calibration snapshot)  
+  - `harness_runs/<run_id>/tournament/events/referee_timeline.jsonl` (referee events)  
+
+8. **Calibration Metrics**
+
+- Net score = sum of +1/-1 referee points.  
+- Accuracy = fraction correct adjudications.  
+- Expected Calibration Error (ECE) by confidence bins.  
+- Brier score for multi-class decisions.  
+- Overturn rate: fraction of decisions changed after replay.  
+- Flaky rate: proportion of inconclusive oracle outcomes.  
+- Determinism rate: fraction of adjudications reproducible byte-for-byte on rerun (target 1.0).  
+
+**Recommended thresholds:**  
+- Determinism rate ≥ 100%  
+- Overturn rate < 10%  
+- ECE < 0.08  
+- Rolling accuracy > 0.6  
+
+---
+
+**Example adjudication.json**
+
+```json
+{
+  "adjudication_id": "adj_001",
+  "claim_id": "clm_123",
+  "run_id": "a007_tesseract_20260225",
+  "case_id": "A-007",
+  "verdict": "BUG_VALID",
+  "winner": "bug_finder",
+  "confidence": 0.87,
+  "rule_version": "referee-v1",
+  "tie_breaker": "TB3_REPLAY_MAJORITY",
+  "trace": [
+    {"rule_id": "R_ASSERT_FAIL", "result": true}
+  ],
+  "oracle": {"status": "pending"}
+}
+```
+
+**Example score ledger entry (ledger.jsonl)**
+
+```json
+{
+  "adjudication_id": "adj_001",
+  "referee_id": "ref-v1",
+  "oracle_verdict": "BUG_VALID",
+  "referee_verdict": "BUG_VALID",
+  "points": 1,
+  "cumulative_score": 14,
+  "prev_hash": "abc123...",
+  "record_hash": "def456..."
+}
+```
+
+---
+
+**High-Level Workflow ASCII**
+
+```
+Harness Run Artifacts
+        ↓
+  Claim Submission
+        ↓
+   Evidence Freeze
+        ↓
+  Referee Adjudication
+        ↓
+ Replay (if needed)
+        ↓
+     Oracle Outcome
+        ↓
+    Scoring Ledger Update
+        ↓
+Calibration Metrics Update
+```
+
+This design ensures deterministic, auditable adjudication, integrates tightly with existing harness artifacts, and supports robust, fair scoring of bug-finder, disprover, and referee agents.
+
+
+[2026-03-03T19:54:47] codex
+
+Skill note: no listed skill directly applies here (`auto-test`, `skill-creator`, `skill-installer`), so I used direct protocol design based on existing harness artifacts.
+
+**Referee Protocol**
+Using the current harness outputs documented in `documentation/test_harness.md` and produced by `tests/harness/runner.py` + `tests/harness/evidence.py`, this is a deterministic design.
+
+1. `Round Setup`
+- Define `tournament_id`, `round_id`, submission deadline, replay policy (`N=3` recommended), and referee rule version.
+- Freeze accepted artifact roots to exactly one run: `harness_runs/<run_id>/...`.
+
+2. `Claim Intake`
+- Bug-finder submits one structured claim per `case_id`.
+- Disprove agent submits one counterclaim per same `case_id`.
+- Claims without machine-checkable evidence pointers are rejected at intake.
+
+3. `Evidence Freeze`
+- Referee resolves artifact references and computes a canonical `evidence_bundle_hash`.
+- Canonicalize JSON with sorted keys and normalized numbers/booleans.
+- Store resolved values from pointers so later replay does not depend on parser differences.
+
+4. `Deterministic Adjudication`
+- Evaluate bug claim and disprove claim as `SUPPORTED`, `UNSUPPORTED`, or `UNDECIDABLE`.
+- Use fixed decision matrix and fixed tie-breaker order.
+- Emit `verdict`, `winner`, `confidence`, `rule_trace`, `tie_breaker_used`.
+
+5. `Oracle Settlement For Referee Scoring`
+- Independent settlement job computes oracle label from deterministic replay policy.
+- Compare referee verdict vs oracle and award `+1` or `-1`.
+- No self-grading: the same process that made the initial verdict should not settle itself.
+
+6. `Audit + Replay`
+- Every step writes append-only JSONL events plus hash-chained ledger records.
+- Replay requires only run artifacts + claim files + referee rule version.
+
+**Evidence Standards**
+- `Tier A (Primary)`: `snapshots/cases/<case_id>.json` facts (checks, statuses, doc stats, chat results).
+- `Tier B (Secondary)`: `summary.json`, `snapshots/run_context.json`, `events/timeline.jsonl`, `api/health.json`.
+- `Tier C (Tertiary)`: `logs/managed_app.log` and other free text.
+- Minimum acceptance rule: every claim must include at least one Tier A citation.
+- Logs can explain cause but cannot override contradictory Tier A facts.
+
+**Decision Matrix**
+Use per-case claim outcomes after evidence validation:
+
+| Bug Claim | Disprove Claim | Verdict | Winner |
+|---|---|---|---|
+| SUPPORTED | UNSUPPORTED | `BUG_VALID` | `bug_finder` |
+| UNSUPPORTED | SUPPORTED | `BUG_INVALID` | `disprover` |
+| SUPPORTED | SUPPORTED | tie-breakers | tie-break result |
+| UNSUPPORTED | UNSUPPORTED | tie-breakers | tie-break result |
+| Any UNDECIDABLE | any | tie-breakers | tie-break result |
+
+Tie-breaker order (strict, deterministic):
+1. Higher evidence tier wins (`A > B > C`).
+2. More independent supporting facts at highest tier wins.
+3. Replay majority on fixed `N=3` runs wins.
+4. If still unresolved, output `INSUFFICIENT_EVIDENCE` and mark round as `draw`.
+
+**Referee Scoring**
+Required rule:
+
+```text
+points_i = +1 if referee_verdict_i == oracle_verdict_i else -1
+total_score = Σ points_i
+accuracy = correct / settled
+```
+
+Recommended labels for oracle/verdict: `BUG_VALID`, `BUG_INVALID`, `INSUFFICIENT_EVIDENCE`.  
+Exact-label match determines correctness.
+
+**Recommended Data Model**
+Use append-only JSONL + per-object JSON files.
+
+| Entity | Key Fields |
+|---|---|
+| `Claim` | `claim_id`, `tournament_id`, `round_id`, `run_id`, `case_id`, `side`, `claim_type`, `predicate`, `evidence_refs`, `submitted_at_utc` |
+| `EvidenceRef` | `artifact_path`, `json_pointer`, `resolved_value`, `artifact_sha256`, `tier` |
+| `Adjudication` | `adjudication_id`, `claim_id`, `counterclaim_id`, `verdict`, `winner`, `confidence`, `rule_version`, `rule_trace`, `tie_breaker_used`, `bundle_hash` |
+| `OracleOutcome` | `adjudication_id`, `oracle_verdict`, `replay_run_ids`, `settled_at_utc`, `settlement_version` |
+| `ScoreLedgerEntry` | `entry_id`, `adjudication_id`, `referee_id`, `referee_verdict`, `oracle_verdict`, `points`, `cumulative_score`, `prev_hash`, `entry_hash`, `timestamp_utc` |
+| `CalibrationSnapshot` | `window`, `accuracy`, `net_score`, `ece`, `brier`, `overturn_rate`, `flaky_rate`, `determinism_rate` |
+
+**Workflow Integration With Harness Artifacts**
+Inputs already available from harness:
+- `harness_runs/<run_id>/snapshots/cases/<case_id>.json`
+- `harness_runs/<run_id>/events/timeline.jsonl`
+- `harness_runs/<run_id>/snapshots/run_context.json`
+- `harness_runs/<run_id>/summary.json`
+- `harness_runs/<run_id>/api/health.json`
+- `harness_runs/<run_id>/logs/managed_app.log` (optional)
+
+Recommended new outputs under same run:
+- `harness_runs/<run_id>/tournament/claims/<claim_id>.json`
+- `harness_runs/<run_id>/tournament/counterclaims/<counterclaim_id>.json`
+- `harness_runs/<run_id>/tournament/adjudications/<adjudication_id>.json`
+- `harness_runs/<run_id>/tournament/scores/referee_ledger.jsonl`
+- `harness_runs/<run_id>/tournament/scores/leaderboard.json`
+- `harness_runs/<run_id>/tournament/scores/calibration.json`
+- `harness_runs/<run_id>/tournament/events/referee_timeline.jsonl`
+
+**Calibration Metrics**
+Track these continuously:
+- `Net score`: should trend positive.
+- `Accuracy`: settled exact-match rate.
+- `ECE`: confidence calibration gap.
+- `Brier score`: probabilistic quality.
+- `Overturn rate`: % provisional verdicts changed by oracle replay.
+- `Flaky rate`: % `INSUFFICIENT_EVIDENCE` due replay instability.
+- `Determinism rate`: same input bundle + rule version => identical output (target `100%`).
+
+If you want, I can next convert this into an implementation-ready spec with concrete JSON schemas and deterministic rule IDs (`R001`, `TB01`, etc.) mapped directly to fields already emitted in `tests/harness/runner.py`.
+[2026-03-03T19:54:49] tokens used: 81,220

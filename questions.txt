@@ -1,0 +1,5 @@
+How many invoices are there?
+Which invoices include customers based in Indonesia
+List all the customers who the invoices have been made to
+Explain the Lakerunner diagram in Airtel cloud prep
+explain what role Lakerunner plays in internal monitoring

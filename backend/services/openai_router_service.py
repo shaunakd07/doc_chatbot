@@ -8,6 +8,8 @@ from openai import OpenAI
 
 ALLOWED_TASK_TYPES = {
     "qa",
+    "count",
+    "metadata_query",
     "compare",
     "summarize",
     "image_qa",
@@ -16,6 +18,33 @@ ALLOWED_TASK_TYPES = {
     "out_of_scope",
 }
 ALLOWED_STRATEGIES = {"semantic", "balanced", "image_first"}
+ALLOWED_METADATA_OPERATIONS = {
+    "count",
+    "latest_uploaded",
+    "earliest_uploaded",
+    "created_after",
+    "created_before",
+    "created_between",
+    "modified_within_days",
+    "list",
+    "most_frequently_updated",
+    "changed_between_versions",
+    "authored_by",
+    "edited_by",
+    "last_modified_by",
+    "external_collaborators",
+    "uploaded_by_role",
+}
+ALLOWED_EXPECTED_ANSWER_TYPES = {
+    "count",
+    "person",
+    "document",
+    "list",
+    "comparison",
+    "timeline",
+    "boolean",
+    "unknown",
+}
 
 
 class OpenAIRouterService:
@@ -37,9 +66,11 @@ class OpenAIRouterService:
         system_prompt = (
             "You are a routing classifier for a document chatbot. "
             "Return ONLY JSON with keys: task_type, needs_cross_doc, needs_numeric_extraction, "
-            "needs_image_reasoning, retrieval_plan, analysis_plan, confidence, rationale. "
-            "task_type must be one of qa, compare, summarize, image_qa, timeline, trend_analysis, out_of_scope. "
+            "needs_image_reasoning, retrieval_plan, analysis_plan, expected_answer_type, confidence, rationale. "
+            "task_type must be one of qa, count, metadata_query, compare, summarize, image_qa, timeline, trend_analysis, out_of_scope. "
             "retrieval_plan must contain strategy (semantic|balanced|image_first), top_k, per_doc_limit. "
+            "Set task_type=count or metadata_query for metadata-driven questions (counts, latest/earliest upload, date filters, "
+            "authors/editors, collaborator role, versions/changes). "
             "Set task_type=compare ONLY when the user explicitly asks to compare or asks for differences, changes, "
             "before/after, or timeline evolution. For multi-document synthesis or aggregation questions that do not "
             "ask for differences, set task_type=qa and needs_cross_doc=true. "
@@ -47,6 +78,13 @@ class OpenAIRouterService:
             "For trend_analysis set needs_cross_doc=true and needs_numeric_extraction=true. "
             "analysis_plan should include query_entities (list[str]) and evidence_classes (list[str]) inferred "
             "from the query content, not hardcoded labels. "
+            "expected_answer_type must be one of count, person, document, list, comparison, timeline, boolean, unknown. "
+            "For count/metadata_query, analysis_plan should include metadata_operation and metadata_filters. "
+            "metadata_operation must be one of count, latest_uploaded, earliest_uploaded, created_after, created_before, "
+            "created_between, modified_within_days, list, most_frequently_updated, changed_between_versions, authored_by, "
+            "edited_by, last_modified_by, external_collaborators, uploaded_by_role. "
+            "metadata_filters may include doc_type, author, last_modified_by, uploader_role, collaborator_type, date_from, date_to, "
+            "relative_days, target_document, version_a, version_b. "
             "When needs_cross_doc=true, prefer retrieval_plan.strategy=balanced with top_k>=10 and per_doc_limit>=2. "
             "needs_cross_doc indicates retrieval coverage across multiple docs, not answer format."
         )
@@ -105,6 +143,9 @@ class OpenAIRouterService:
         confidence = max(0.0, min(1.0, confidence))
         needs_cross_doc = bool(data.get("needs_cross_doc", False))
         needs_numeric_extraction = bool(data.get("needs_numeric_extraction", False))
+        if task_type in {"count", "metadata_query"}:
+            needs_cross_doc = True
+            needs_numeric_extraction = False
         if task_type == "trend_analysis":
             needs_cross_doc = True
             needs_numeric_extraction = True
@@ -143,6 +184,55 @@ class OpenAIRouterService:
                 analysis_plan["query_entities"] = entities
             if evidence_classes:
                 analysis_plan["evidence_classes"] = evidence_classes
+            metadata_operation = str(raw_plan.get("metadata_operation", "")).strip().lower()
+            if metadata_operation in ALLOWED_METADATA_OPERATIONS:
+                analysis_plan["metadata_operation"] = metadata_operation
+            raw_filters = raw_plan.get("metadata_filters")
+            metadata_filters: Dict[str, Any] = {}
+            if isinstance(raw_filters, dict):
+                for key in (
+                    "doc_type",
+                    "author",
+                    "last_modified_by",
+                    "uploader_role",
+                    "collaborator_type",
+                    "date_from",
+                    "date_to",
+                    "target_document",
+                ):
+                    value = str(raw_filters.get(key, "")).strip()
+                    if value:
+                        metadata_filters[key] = value
+                for key in ("relative_days", "version_a", "version_b"):
+                    try:
+                        value = int(raw_filters.get(key))
+                    except Exception:
+                        value = None
+                    if value is not None:
+                        metadata_filters[key] = value
+            if metadata_filters:
+                analysis_plan["metadata_filters"] = metadata_filters
+        expected_answer_type = str(data.get("expected_answer_type", "")).strip().lower()
+        if expected_answer_type not in ALLOWED_EXPECTED_ANSWER_TYPES:
+            if task_type == "count":
+                operation_hint = str(analysis_plan.get("metadata_operation") or "").strip().lower()
+                expected_answer_type = "count" if operation_hint == "count" else "unknown"
+            elif task_type in {"compare", "trend_analysis"}:
+                expected_answer_type = "comparison"
+            elif task_type == "timeline":
+                expected_answer_type = "timeline"
+            elif task_type == "metadata_query":
+                operation = str(analysis_plan.get("metadata_operation") or "").strip().lower()
+                if operation == "count":
+                    expected_answer_type = "count"
+                elif operation in {"last_modified_by", "authored_by", "edited_by"}:
+                    expected_answer_type = "person"
+                elif operation in {"latest_uploaded", "earliest_uploaded", "most_frequently_updated", "changed_between_versions"}:
+                    expected_answer_type = "document"
+                else:
+                    expected_answer_type = "list"
+            else:
+                expected_answer_type = "unknown"
         return {
             "task_type": task_type,
             "needs_cross_doc": needs_cross_doc,
@@ -154,6 +244,7 @@ class OpenAIRouterService:
                 "per_doc_limit": max(1, min(12, per_doc_limit)),
             },
             "analysis_plan": analysis_plan,
+            "expected_answer_type": expected_answer_type,
             "confidence": confidence,
             "rationale": str(data.get("rationale", "")).strip(),
         }

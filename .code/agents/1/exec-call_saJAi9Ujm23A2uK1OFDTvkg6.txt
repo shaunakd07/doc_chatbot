@@ -22,7 +22,7 @@ TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_&.\-]{1,}")
 YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
 COUNT_SIGNAL_RE = re.compile(r"\b(?:how many|number of|count|total number|total count)\b", flags=re.IGNORECASE)
 NUMERIC_SIGNAL_RE = re.compile(
-    r"(?i)(?:[$€£¥]\s?\d[\d,]*(?:\.\d+)?|\b(?:usd|sgd|inr|idr|myr|rm|eur|gbp)\b|\b\d[\d,]*(?:\.\d+)?\s?(?:%|k|m|b|million|billion|crore|lakh)\b)"
+    r"(?i)(?:[$ƒ,ªAœA]\s?\d[\d,]*(?:\.\d+)?|\b(?:usd|sgd|inr|idr|myr|rm|eur|gbp)\b|\b\d[\d,]*(?:\.\d+)?\s?(?:%|k|m|b|million|billion|crore|lakh)\b)"
 )
 QUERY_STOPWORDS = {
     "a",

@@ -54,7 +54,71 @@ class RouterSchemaTests(unittest.TestCase):
         self.assertTrue(classes)
         self.assertEqual("invoice", classes[0].lower())
 
+    def test_openai_router_accepts_count_task_type(self) -> None:
+        router = OpenAIRouterService(model_id="gpt-4o-mini", api_key="test-key")
+        parsed = router._parse_route_json(
+            """
+            {
+              "task_type": "count",
+              "needs_cross_doc": false,
+              "needs_numeric_extraction": true,
+              "needs_image_reasoning": false,
+              "retrieval_plan": {"strategy": "semantic", "top_k": 4, "per_doc_limit": 1},
+              "analysis_plan": {},
+              "confidence": 0.88,
+              "rationale": "counting documents"
+            }
+            """
+        )
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertEqual("count", parsed["task_type"])
+        self.assertTrue(parsed["needs_cross_doc"])
+        self.assertFalse(parsed["needs_numeric_extraction"])
+        self.assertEqual("balanced", parsed["retrieval_plan"]["strategy"])
+        self.assertEqual("unknown", parsed["expected_answer_type"])
+
+    def test_openai_router_uses_count_expected_type_when_operation_is_count(self) -> None:
+        router = OpenAIRouterService(model_id="gpt-4o-mini", api_key="test-key")
+        parsed = router._parse_route_json(
+            """
+            {
+              "task_type": "count",
+              "needs_cross_doc": false,
+              "needs_numeric_extraction": false,
+              "needs_image_reasoning": false,
+              "retrieval_plan": {"strategy": "semantic", "top_k": 6, "per_doc_limit": 1},
+              "analysis_plan": {"metadata_operation": "count"},
+              "confidence": 0.88,
+              "rationale": "count operation explicit"
+            }
+            """
+        )
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertEqual("count", parsed["expected_answer_type"])
+
+    def test_openai_router_infers_expected_answer_type_for_person_metadata_query(self) -> None:
+        router = OpenAIRouterService(model_id="gpt-4o-mini", api_key="test-key")
+        parsed = router._parse_route_json(
+            """
+            {
+              "task_type": "metadata_query",
+              "needs_cross_doc": true,
+              "needs_numeric_extraction": false,
+              "needs_image_reasoning": false,
+              "retrieval_plan": {"strategy": "balanced", "top_k": 10, "per_doc_limit": 2},
+              "analysis_plan": {"metadata_operation": "last_modified_by", "metadata_filters": {"target_document": "Airtel pptx"}},
+              "confidence": 0.84,
+              "rationale": "metadata person lookup"
+            }
+            """
+        )
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertEqual("metadata_query", parsed["task_type"])
+        self.assertEqual("person", parsed["expected_answer_type"])
+
 
 if __name__ == "__main__":
     unittest.main()
-

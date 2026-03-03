@@ -20,9 +20,7 @@ from .extractors import (
     extract_xlsx,
 )
 from .diagram_parser import parse_image_diagram
-from .doc_metadata import collect_document_metadata, compute_version_metadata
 from .doc_tags import build_document_auto_tags
-from .doc_types import infer_doc_type
 from .ocr import extract_text_from_image
 from .text_chunker import chunk_text
 from .. import config, storage
@@ -166,7 +164,7 @@ def ingest_file(
             status=status,
             num_pages=num_pages,
             metadata=payload,
-            merge_metadata=True,
+            merge_metadata=False,
         )
         last_progress_emit_at = now
         last_progress_value = next_value
@@ -178,23 +176,6 @@ def ingest_file(
     try:
         document = storage.get_document(doc_id) or {}
         doc_filename = str(document.get("filename") or file_path.name)
-        existing_metadata = document.get("metadata") if isinstance(document.get("metadata"), dict) else {}
-        base_metadata = collect_document_metadata(
-            path=file_path,
-            doc_id=doc_id,
-            filename=doc_filename,
-            existing_metadata=existing_metadata,
-        )
-        version_metadata = compute_version_metadata(
-            doc_id=doc_id,
-            doc_metadata=base_metadata,
-            documents=storage.list_documents(),
-        )
-        storage.update_document(
-            doc_id,
-            metadata={**base_metadata, **version_metadata},
-            merge_metadata=True,
-        )
         processed_image_dir = config.PROCESSED_DIR / doc_id / "images"
         processed_image_dir.mkdir(parents=True, exist_ok=True)
 
@@ -492,11 +473,6 @@ def ingest_file(
             if str(chunk.get("content") or "").strip()
         ][:56]
         auto_tags = build_document_auto_tags(doc_filename, tag_samples, limit=32)
-        doc_type, doc_type_confidence, doc_type_scores = infer_doc_type(
-            doc_filename,
-            auto_tags,
-            tag_samples[:12],
-        )
 
         for chunk in chunks:
             page = chunk.get("page")
@@ -585,9 +561,6 @@ def ingest_file(
                 "ingest_chunk_count": len(chunks),
                 "auto_tags": auto_tags,
                 "auto_tag_version": "v1",
-                "doc_type": doc_type,
-                "doc_type_confidence": doc_type_confidence,
-                "doc_type_scores": doc_type_scores,
                 "ingest_error": None,
             },
             force=True,
@@ -604,37 +577,15 @@ def ingest_file(
         raise
 
 
-def create_document_record(
-    filename: str,
-    *,
-    source_system: str = "upload",
-    source_uri: str | None = None,
-    tenant_id: str | None = None,
-    uploader: Dict[str, Any] | None = None,
-) -> str:
+def create_document_record(filename: str) -> str:
     doc_id = str(uuid.uuid4())
     created_at = datetime.now(timezone.utc).isoformat()
-    uploader = uploader if isinstance(uploader, dict) else {}
     storage.add_document(
         doc_id=doc_id,
         filename=filename,
         status="queued",
         created_at=created_at,
         metadata={
-            "document_id": doc_id,
-            "tenant_id": str(tenant_id or config.DEFAULT_TENANT_ID).strip() or config.DEFAULT_TENANT_ID,
-            "source_system": str(source_system or "upload").strip() or "upload",
-            "source_uri": str(source_uri or filename).strip() or filename,
-            "created_at": created_at,
-            "uploaded_at": created_at,
-            "updated_at": created_at,
-            "original_filename": filename,
-            "uploaded_by_id": str(uploader.get("id") or "").strip(),
-            "uploaded_by_name": str(uploader.get("name") or "").strip(),
-            "uploaded_by_email": str(uploader.get("email") or "").strip(),
-            "uploaded_by_role": str(uploader.get("role") or "").strip(),
-            "uploaded_by_type": str(uploader.get("type") or "").strip(),
-            "collaborator_type": str(uploader.get("collaborator_type") or "").strip(),
             "ingest_progress": 0,
             "ingest_stage": "queued",
             "ingest_message": "Queued for ingestion",
