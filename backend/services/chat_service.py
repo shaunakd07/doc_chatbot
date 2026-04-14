@@ -4,8 +4,10 @@ import json
 import logging
 import re
 import traceback
+import uuid
 from collections import Counter, defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any, List, Optional
 
 import numpy as np
@@ -14,6 +16,7 @@ from .. import config, storage
 from ..ingestion.doc_tags import build_document_auto_tags, normalize_tags
 from ..ingestion.doc_types import DOC_TYPE_HINTS, DOC_TYPE_LABELS, extract_query_doc_type_candidates
 from ..models.prompts import build_compare_prompt, build_prompt
+from .metadata_semantic_adapter import MetadataSemanticAdapter
 from PIL import Image
 
 logger = logging.getLogger(__name__)
@@ -61,6 +64,7 @@ QUERY_STOPWORDS = {
     "the",
     "their",
     "them",
+    "there",
     "these",
     "they",
     "this",
@@ -119,6 +123,242 @@ EXPECTED_ANSWER_TYPES = {
 }
 PERSON_METADATA_OPERATIONS = {"last_modified_by", "authored_by", "edited_by"}
 GENERIC_METADATA_OPERATIONS = {"list", "count"}
+QUERY_INTENT_METADATA_FIELDS = {
+    "doc_type",
+    "author",
+    "last_modified_by",
+    "uploader_role",
+    "collaborator_type",
+    "date_from",
+    "date_to",
+    "relative_days",
+    "target_document",
+    "version_a",
+    "version_b",
+}
+QUERY_INTENT_NON_SEMANTIC_TERMS = {
+    "count",
+    "list",
+    "number",
+    "many",
+    "total",
+    "document",
+    "documents",
+    "file",
+    "files",
+    "show",
+    "give",
+    "find",
+}
+SUMMARY_ROUTE_PREFIX_RE = re.compile(
+    r"(?is)^\s*(?:please\s+)?(?:summari[sz]e|describe|explain|tell me about)\s+(?:the\s+)?(?P<body>.+?)\s*$"
+)
+SUMMARY_ROUTE_WHAT_SAY_RE = re.compile(
+    r"(?is)^\s*what does\s+(?:the\s+)?(?P<body>.+?)\s+say\s*[?.!]*\s*$"
+)
+SEMANTIC_TEMPORAL_TERMS = {
+    "effective",
+    "execution",
+    "executed",
+    "signed",
+    "dated",
+    "term",
+    "termination",
+    "expiry",
+    "expiration",
+    "valid",
+    "validity",
+    "active",
+    "inactive",
+    "lapse",
+    "lapsed",
+}
+SEMANTIC_PARTY_TERMS = {
+    "party",
+    "parties",
+    "counterparty",
+    "counterparties",
+    "customer",
+    "client",
+    "vendor",
+    "supplier",
+    "recipient",
+    "buyer",
+    "seller",
+}
+STATUS_EXPIRED_TERMS = {"expired", "inactive", "lapsed", "terminated", "ended"}
+STATUS_ACTIVE_TERMS = {"active", "valid", "effective", "enforceable", "current"}
+SEMANTIC_EXPANSION_TERMS = (
+    "agreement effective date execution date signature date termination date expiry date party counterparty validity period",
+    "contract commencement date end date renewal clause signatory named party legal entity",
+)
+DATE_ROLE_TERMS = {
+    "termination": {"termination", "terminate", "terminated", "expiry", "expiration", "expires", "end"},
+    "execution": {"executed", "execution", "signed", "dated", "signature"},
+    "effective": {"effective", "commencement", "start", "in_force", "valid_from"},
+}
+MONTH_NAME_TO_NUM = {
+    "jan": 1,
+    "january": 1,
+    "feb": 2,
+    "february": 2,
+    "mar": 3,
+    "march": 3,
+    "apr": 4,
+    "april": 4,
+    "may": 5,
+    "jun": 6,
+    "june": 6,
+    "jul": 7,
+    "july": 7,
+    "aug": 8,
+    "august": 8,
+    "sep": 9,
+    "sept": 9,
+    "september": 9,
+    "oct": 10,
+    "october": 10,
+    "nov": 11,
+    "november": 11,
+    "dec": 12,
+    "december": 12,
+}
+ISO_DATE_RE = re.compile(r"\b((?:19|20)\d{2})[-/](0[1-9]|1[0-2])[-/](0[1-9]|[12]\d|3[01])\b")
+DMY_MONTH_RE = re.compile(
+    r"\b([0-3]?\d)\s+"
+    r"(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|"
+    r"sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+    r"\s+((?:19|20)\d{2})\b",
+    flags=re.IGNORECASE,
+)
+MONTH_DY_RE = re.compile(
+    r"\b("
+    r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|"
+    r"sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+    r"\s+([0-3]?\d),\s*((?:19|20)\d{2})\b",
+    flags=re.IGNORECASE,
+)
+QUERY_AMOUNT_RE = re.compile(
+    r"(?ix)"
+    r"(?<![A-Za-z0-9])"
+    r"(?:(?P<currency_before>USD|SGD|EUR|GBP|INR|IDR|MYR|RM|AED|AUD|CAD|CHF|CNY|HKD|JPY)\s*|(?P<symbol>[$]))"
+    r"(?P<number>\d{1,3}(?:,\d{3})+|\d+)"
+    r"(?P<decimal>\.\d{1,2})?"
+    r"(?:\s*(?P<magnitude>k|m|b|thousand|million|billion))?"
+    r"(?:\s*(?P<currency_after>USD|SGD|EUR|GBP|INR|IDR|MYR|RM|AED|AUD|CAD|CHF|CNY|HKD|JPY))?"
+    r"(?![A-Za-z0-9])"
+)
+EXACT_DOCUMENT_LOOKUP_MARKERS = (
+    "which document",
+    "which documents",
+    "what document",
+    "what documents",
+    "which file",
+    "which files",
+)
+EXACT_CONTAINS_MARKERS = (
+    "contains",
+    "contain",
+    "mentions",
+    "mention",
+    "mentioned",
+    "includes",
+    "include",
+    "included",
+    "has",
+    "have",
+    "named",
+)
+FACT_DATE_HINTS = {
+    "date",
+    "dated",
+    "signed",
+    "executed",
+    "effective",
+    "execution",
+    "expiry",
+    "expiration",
+    "terminate",
+    "termination",
+}
+FACT_AMOUNT_HINTS = {
+    "amount",
+    "value",
+    "price",
+    "pricing",
+    "fee",
+    "fees",
+    "payment",
+    "payments",
+    "total",
+    "consideration",
+    "contract value",
+}
+FACT_PARTY_HINTS = {
+    "party",
+    "parties",
+    "counterparty",
+    "counterparties",
+    "customer",
+    "customers",
+    "client",
+    "clients",
+    "vendor",
+    "vendors",
+    "supplier",
+    "suppliers",
+    "buyer",
+    "buyers",
+    "seller",
+    "sellers",
+    "recipient",
+    "recipients",
+}
+ENTITY_SUFFIX_TOKENS = {
+    "bank",
+    "bhd",
+    "co",
+    "company",
+    "corp",
+    "corporation",
+    "group",
+    "holdings",
+    "inc",
+    "llc",
+    "llp",
+    "limited",
+    "ltd",
+    "plc",
+    "pte",
+    "services",
+    "solutions",
+    "systems",
+    "technologies",
+    "technology",
+    "labs",
+}
+QUERY_CURRENCY_CODE_MAP = {
+    "$": "USD",
+    "usd": "USD",
+    "sgd": "SGD",
+    "eur": "EUR",
+    "gbp": "GBP",
+    "inr": "INR",
+    "idr": "IDR",
+    "myr": "MYR",
+    "rm": "MYR",
+    "aed": "AED",
+    "aud": "AUD",
+    "cad": "CAD",
+    "chf": "CHF",
+    "cny": "CNY",
+    "hkd": "HKD",
+    "jpy": "JPY",
+}
+EVIDENCE_SPAN_SOURCE_TYPES = {"text", "ocr", "table"}
+EVIDENCE_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9])")
+EVIDENCE_CLAUSE_SPLIT_RE = re.compile(r"\s*(?:[;:]\s+|\|\s+)\s*")
+WEAK_EVIDENCE_PREFIX = "I have weak evidence, my best guess is:"
 
 
 class ChatService:
@@ -128,17 +368,64 @@ class ChatService:
         model,
         enable_vlm: bool,
         router=None,
+        metadata_semantic_adapter=None,
         max_context_chars: int = 12000,
     ) -> None:
         self.retrieval = retrieval_service
         self.model = model
         self.enable_vlm = enable_vlm
         self.router = router
+        self.metadata_semantic_adapter = metadata_semantic_adapter or MetadataSemanticAdapter(
+            retrieval_service,
+            expansion_model=model,
+        )
         self.max_context_chars = max_context_chars
         self.last_generation_error: str | None = None
         self.last_route: dict[str, Any] | None = None
         self._doc_tag_cache: dict[str, list[str]] = {}
         self._tag_embedding_cache: dict[str, np.ndarray] = {}
+
+    def _log_preview(self, value: Any, limit: int = 180) -> str:
+        text = re.sub(r"\s+", " ", str(value or "").strip())
+        if len(text) <= limit:
+            return text
+        return text[: max(0, limit - 3)] + "..."
+
+    def _log_json_event(self, event: str, payload: dict[str, Any]) -> None:
+        try:
+            logger.info("%s %s", event, json.dumps(payload, sort_keys=True, default=str))
+        except Exception:
+            logger.info("%s %s", event, str(payload))
+
+    def _chunk_log_summary(self, chunks: List[dict]) -> dict[str, Any]:
+        source_counts: Counter[str] = Counter()
+        doc_ids: list[str] = []
+        seen_doc_ids: set[str] = set()
+        top_chunks: list[dict[str, Any]] = []
+        for chunk in chunks[:5]:
+            top_chunks.append(
+                {
+                    "doc_id": str(chunk.get("doc_id") or ""),
+                    "doc_filename": self._log_preview(chunk.get("doc_filename"), limit=120),
+                    "page": chunk.get("page"),
+                    "source_type": str(chunk.get("source_type") or ""),
+                    "score": round(float(chunk.get("rerank_score", chunk.get("score", 0.0)) or 0.0), 4),
+                }
+            )
+        for chunk in chunks:
+            source_type = str(chunk.get("source_type") or "unknown").strip().lower() or "unknown"
+            source_counts[source_type] += 1
+            doc_id = str(chunk.get("doc_id") or "").strip()
+            if doc_id and doc_id not in seen_doc_ids:
+                seen_doc_ids.add(doc_id)
+                doc_ids.append(doc_id)
+        return {
+            "chunk_count": len(chunks),
+            "doc_count": len(doc_ids),
+            "doc_ids": doc_ids[:8],
+            "source_type_counts": dict(sorted(source_counts.items())),
+            "top_chunks": top_chunks,
+        }
 
     def answer(
         self,
@@ -146,9 +433,19 @@ class ChatService:
         doc_ids: Optional[List[str]] = None,
         top_k: int = 5,
         include_document_summaries: bool = True,
+        conversation_id: Optional[str] = None,
     ) -> dict:
-        route = self._route_question(question, doc_ids, default_top_k=top_k)
-        route = self._repair_metadata_route_if_needed(question, route, doc_ids=doc_ids)
+        original_question = str(question or "").strip()
+        retrieval_question = original_question
+        session_id = self._normalize_conversation_id(conversation_id)
+        conversation_state: dict[str, Any] = {}
+        if session_id and bool(config.CHAT_MEMORY_ENABLED):
+            conversation_state = self._load_conversation_state(session_id)
+            retrieval_question = self._rewrite_question_with_conversation(original_question, conversation_state)
+
+        route = self._route_question(retrieval_question, doc_ids, default_top_k=top_k)
+        route = self._repair_metadata_route_if_needed(retrieval_question, route, doc_ids=doc_ids)
+        route = self._repair_named_document_summary_route_if_needed(retrieval_question, route, doc_ids=doc_ids)
         self.last_route = route
         intent = str(route.get("task_type", "qa")).strip().lower()
         if intent not in {"compare", "qa", "trend_analysis", "count", "metadata_query"}:
@@ -158,25 +455,81 @@ class ChatService:
             intent = str(metadata_signal.get("intent") or intent or "metadata_query")
             route["task_type"] = intent
             route["metadata_query"] = metadata_signal
-            answer, sources = self._answer_metadata_query(
-                question,
+            self._log_json_event(
+                "chat.route",
+                {
+                    "conversation_id": session_id or "",
+                    "question_preview": self._log_preview(original_question),
+                    "resolved_question_preview": self._log_preview(retrieval_question),
+                    "selected_doc_count": len(doc_ids or []),
+                    "selected_doc_ids": list(doc_ids or [])[:8],
+                    "task_type": intent,
+                    "needs_cross_doc": bool(route.get("needs_cross_doc", False)),
+                    "needs_numeric_extraction": bool(route.get("needs_numeric_extraction", False)),
+                    "needs_image_reasoning": bool(route.get("needs_image_reasoning", False)),
+                    "retrieval_plan": route.get("retrieval_plan") if isinstance(route.get("retrieval_plan"), dict) else {},
+                    "route_source": str(route.get("source") or ""),
+                    "route_confidence": route.get("confidence"),
+                    "expected_answer_type": str(route.get("expected_answer_type") or ""),
+                    "analysis_plan": route.get("analysis_plan") if isinstance(route.get("analysis_plan"), dict) else {},
+                    "metadata_signal": metadata_signal,
+                },
+            )
+            answer, sources, query_intent = self._answer_metadata_or_hybrid_query(
+                retrieval_question,
                 doc_ids=doc_ids,
                 metadata_signal=metadata_signal,
             )
-            return {
+            route["query_intent"] = query_intent
+            response = {
                 "answer": answer,
                 "sources": sources,
                 "intent": intent,
                 "route": route,
                 "include_document_summaries": False,
             }
+            if session_id:
+                response["conversation_id"] = session_id
+                self._persist_conversation_turn(
+                    session_id,
+                    question=original_question,
+                    answer=answer,
+                    route=route,
+                    intent=intent,
+                    resolved_question=retrieval_question,
+                )
+            self._log_json_event(
+                "chat.answer",
+                {
+                    "conversation_id": session_id or "",
+                    "intent": intent,
+                    "task_type": str(route.get("task_type") or intent),
+                    "needs_cross_doc": bool(route.get("needs_cross_doc", False)),
+                    "needs_numeric_extraction": bool(route.get("needs_numeric_extraction", False)),
+                    "needs_image_reasoning": bool(route.get("needs_image_reasoning", False)),
+                    "retrieval_plan": route.get("retrieval_plan") if isinstance(route.get("retrieval_plan"), dict) else {},
+                    "query_intent": query_intent,
+                    "answer_chars": len(str(answer or "")),
+                    "source_count": len(sources),
+                    "source_doc_count": len({str(source.get("doc_id") or "").strip() for source in sources if str(source.get("doc_id") or "").strip()}),
+                    "source_type_counts": dict(sorted(Counter(str(source.get("source_type") or "unknown") for source in sources).items())),
+                    "generation_error": bool(self.last_generation_error),
+                },
+            )
+            return response
+        prefer_exhaustive_list = self._is_exhaustive_list_query(
+            retrieval_question,
+            route=route,
+            intent=intent,
+            needs_cross_doc=bool(route.get("needs_cross_doc", False)),
+        )
         needs_cross_doc = bool(route.get("needs_cross_doc", False))
         needs_numeric_extraction = bool(route.get("needs_numeric_extraction", False))
         if intent == "trend_analysis":
             needs_cross_doc = True
             needs_numeric_extraction = True
         image_intent = bool(route.get("needs_image_reasoning", False)) or route.get("task_type") == "image_qa"
-        relationship_intent = self._is_relationship_intent(question)
+        relationship_intent = self._is_relationship_intent(retrieval_question)
         diagram_intent = image_intent or relationship_intent
         retrieval_mode, route_top_k, per_doc_limit = self._normalize_retrieval_plan(
             route,
@@ -188,24 +541,108 @@ class ChatService:
         analysis_plan: dict[str, Any] = {}
         if intent == "trend_analysis":
             analysis_plan = self._build_analysis_plan(
-                question,
+                retrieval_question,
                 doc_ids=doc_ids,
                 router_analysis_plan=route.get("analysis_plan"),
                 require_multi_doc=True,
             )
             route["analysis_plan"] = analysis_plan
 
+        exact_lookup_chunks: List[dict] | None = None
+        qa_doc_scope: Optional[List[str]] = None
+        if intent == "qa" and not needs_cross_doc:
+            scoped_docs = self._documents_in_scope(doc_ids)
+            resolved_qa_scope = self._resolve_route_target_doc_ids(route, scoped_docs, min_resolved=1)
+            if len(resolved_qa_scope) == 1:
+                qa_doc_scope = resolved_qa_scope
+        compare_doc_scope: Optional[List[str]] = None
         if intent == "compare":
-            chunks = self._retrieve_for_comparison(
-                question,
-                doc_ids=doc_ids,
+            scoped_docs = self._documents_in_scope(doc_ids)
+            compare_doc_scope = self._resolve_route_target_doc_ids(
+                route,
+                scoped_docs,
+                min_resolved=2,
+            )
+            if not compare_doc_scope:
+                compare_scope = self._select_candidate_docs_for_query(
+                    retrieval_question,
+                    doc_ids=doc_ids,
+                    require_multi_doc=True,
+                )
+                compare_doc_scope = compare_scope["doc_ids"] if compare_scope else doc_ids
+
+        exact_lookup_hint = self._route_exact_lookup_hint(route)
+        self._log_json_event(
+            "chat.route",
+            {
+                "conversation_id": session_id or "",
+                "question_preview": self._log_preview(original_question),
+                "resolved_question_preview": self._log_preview(retrieval_question),
+                "selected_doc_count": len(doc_ids or []),
+                "selected_doc_ids": list(doc_ids or [])[:8],
+                "task_type": intent,
+                "needs_cross_doc": needs_cross_doc,
+                "needs_numeric_extraction": needs_numeric_extraction,
+                "needs_image_reasoning": bool(route.get("needs_image_reasoning", False)),
+                "relationship_intent": relationship_intent,
+                "diagram_intent": diagram_intent,
+                "retrieval_mode": retrieval_mode,
+                "retrieval_plan": route.get("retrieval_plan") if isinstance(route.get("retrieval_plan"), dict) else {},
+                "route_top_k": route_top_k,
+                "per_doc_limit": per_doc_limit,
+                "prefer_exhaustive_list": prefer_exhaustive_list,
+                "route_source": str(route.get("source") or ""),
+                "route_confidence": route.get("confidence"),
+                "expected_answer_type": str(route.get("expected_answer_type") or ""),
+                "analysis_plan": route.get("analysis_plan") if isinstance(route.get("analysis_plan"), dict) else {},
+                "qa_doc_scope": list(qa_doc_scope or [])[:8],
+                "compare_doc_scope": list(compare_doc_scope or [])[:8],
+                "exact_lookup_hint": exact_lookup_hint,
+            },
+        )
+        if intent in {"qa", "compare"}:
+            exact_lookup_chunks, exact_lookup = self._retrieve_for_exact_lookup(
+                retrieval_question,
+                doc_ids=compare_doc_scope if intent == "compare" else (qa_doc_scope or doc_ids),
+                top_k=route_top_k,
+                per_doc_limit=per_doc_limit,
+                mode=retrieval_mode,
+                needs_cross_doc=needs_cross_doc,
+                prefer_exhaustive=prefer_exhaustive_list,
+                allow_compare=intent == "compare",
+                include_fallback=intent == "qa",
+                fact_types_hint=exact_lookup_hint.get("fact_types"),
+                prefer_fact_lookup=bool(exact_lookup_hint.get("requested")),
+            )
+            route["exact_lookup"] = exact_lookup
+        else:
+            route["exact_lookup"] = {
+                "applicable": False,
+                "used_fact_lookup": False,
+                "used_hybrid_fallback": False,
+                "reason": f"intent_{intent}",
+            }
+
+        if intent == "qa" and exact_lookup_chunks is not None:
+            chunks = exact_lookup_chunks
+        elif intent == "compare":
+            compare_chunks = self._retrieve_for_comparison(
+                retrieval_question,
+                doc_ids=compare_doc_scope or doc_ids,
                 top_k=route_top_k,
                 per_doc_limit=per_doc_limit,
                 mode=retrieval_mode,
             )
+            if exact_lookup_chunks:
+                chunks = self._merge_chunks(
+                    list(exact_lookup_chunks) + compare_chunks,
+                    limit=max(16, route_top_k * 4),
+                )
+            else:
+                chunks = compare_chunks
         elif intent == "trend_analysis":
             chunks, coverage = self._retrieve_for_trend_analysis(
-                question,
+                retrieval_question,
                 doc_ids=doc_ids,
                 top_k=route_top_k,
                 per_doc_limit=per_doc_limit,
@@ -217,42 +654,26 @@ class ChatService:
                 route["analysis_plan"]["coverage"] = coverage
         elif needs_cross_doc:
             chunks = self._retrieve_for_cross_doc_qa(
-                question,
+                retrieval_question,
                 doc_ids=doc_ids,
                 top_k=route_top_k,
                 per_doc_limit=per_doc_limit,
                 mode=retrieval_mode,
+                prefer_exhaustive=prefer_exhaustive_list,
             )
         else:
-            scoped = self._select_candidate_docs_for_query(
-                question,
-                doc_ids=doc_ids,
-                require_multi_doc=False,
-            )
-            scoped_doc_ids = scoped["doc_ids"] if scoped else doc_ids
-            chunks = self.retrieval.search(
-                question,
+            chunks = self._retrieve_for_single_doc_qa(
+                retrieval_question,
+                doc_ids=qa_doc_scope or doc_ids,
                 top_k=route_top_k,
-                doc_ids=scoped_doc_ids,
                 mode=retrieval_mode,
+                prefer_exhaustive=prefer_exhaustive_list,
             )
-            if scoped and (
-                not bool(scoped.get("confident"))
-                or self._retrieval_confidence_low(question, chunks, min_docs=1)
-            ):
-                fallback_doc_ids = scoped["doc_ids"] if bool(scoped.get("confident")) else (doc_ids or [])
-                global_chunks = self.retrieval.search(
-                    question,
-                    top_k=route_top_k,
-                    doc_ids=fallback_doc_ids or doc_ids,
-                    mode=retrieval_mode,
-                )
-                chunks = self._merge_chunks(chunks + global_chunks, limit=max(12, route_top_k * 3))
         if image_intent:
-            chunks = self._augment_for_image_queries(question, chunks, doc_ids=doc_ids, mode=retrieval_mode)
+            chunks = self._augment_for_image_queries(retrieval_question, chunks, doc_ids=doc_ids, mode=retrieval_mode)
         if relationship_intent:
             chunks = self._augment_for_relationship_queries(
-                question,
+                retrieval_question,
                 chunks,
                 doc_ids=doc_ids,
                 mode=retrieval_mode,
@@ -260,7 +681,7 @@ class ChatService:
 
         if diagram_intent:
             chunks = self._ensure_diagram_evidence_mix(
-                question,
+                retrieval_question,
                 chunks,
                 doc_ids=doc_ids,
                 mode=retrieval_mode,
@@ -270,6 +691,7 @@ class ChatService:
         chunks = self._dedupe_redundant_chunks(chunks, limit=max(24, route_top_k * 4))
         if diagram_intent:
             chunks = self._prioritize_diagram_chunk_order(chunks)
+        chunks = self._select_evidence_spans(retrieval_question, chunks, intent=intent)
         context_blocks = self._build_context_blocks(chunks)
         
         image_paths: List[str] = []
@@ -290,15 +712,16 @@ class ChatService:
             except Exception as e:
                 logger.warning(f"Could not load image {path}: {e}")
 
+        prompt_question = retrieval_question or original_question
         if intent in {"compare", "trend_analysis"}:
             prompt = build_compare_prompt(
-                question,
+                prompt_question,
                 context_blocks,
                 self._document_briefs(chunks),
                 include_document_summaries=include_document_summaries,
             )
         else:
-            prompt = build_prompt(question, context_blocks)
+            prompt = build_prompt(prompt_question, context_blocks)
             
         self.last_generation_error = None
 
@@ -309,22 +732,22 @@ class ChatService:
                 logger.exception("Model text generation failed: %s", exc)
                 self.last_generation_error = traceback.format_exc(limit=12)
                 answer = self._fallback_answer(
-                    question,
+                    original_question,
                     chunks,
                     intent=intent,
                     include_document_summaries=include_document_summaries,
                 )
         else:
             answer = self._fallback_answer(
-                question,
+                original_question,
                 chunks,
                 intent=intent,
                 include_document_summaries=include_document_summaries,
             )
 
-        if self._looks_like_hard_no_answer(answer) and self._has_relevant_evidence(question, chunks):
+        if self._looks_like_hard_no_answer(answer) and self._has_relevant_evidence(retrieval_question, chunks):
             answer = self._fallback_answer(
-                question,
+                original_question,
                 chunks,
                 intent=intent,
                 include_document_summaries=include_document_summaries,
@@ -340,9 +763,316 @@ class ChatService:
             "route": route,
             "include_document_summaries": include_document_summaries,
         }
+        if session_id:
+            response["conversation_id"] = session_id
+            self._persist_conversation_turn(
+                session_id,
+                question=original_question,
+                answer=answer,
+                route=route,
+                intent=intent,
+                resolved_question=retrieval_question,
+            )
+            if retrieval_question and retrieval_question != original_question:
+                response["resolved_question"] = retrieval_question
         if self.last_generation_error:
             response["generation_error"] = self.last_generation_error
+        self._log_json_event(
+            "chat.answer",
+            {
+                "conversation_id": session_id or "",
+                "intent": intent,
+                "task_type": str(route.get("task_type") or intent),
+                "needs_cross_doc": needs_cross_doc,
+                "needs_numeric_extraction": needs_numeric_extraction,
+                "needs_image_reasoning": bool(route.get("needs_image_reasoning", False)),
+                "retrieval_mode": retrieval_mode,
+                "retrieval_plan": route.get("retrieval_plan") if isinstance(route.get("retrieval_plan"), dict) else {},
+                "include_document_summaries": bool(include_document_summaries),
+                "exact_lookup": route.get("exact_lookup") if isinstance(route.get("exact_lookup"), dict) else {},
+                "chunk_summary": self._chunk_log_summary(chunks),
+                "context_block_count": len(context_blocks),
+                "image_path_count": len(image_paths),
+                "answer_chars": len(str(answer or "")),
+                "source_count": len(response["sources"]),
+                "source_doc_count": len({str(source.get("doc_id") or "").strip() for source in response["sources"] if str(source.get("doc_id") or "").strip()}),
+                "source_type_counts": dict(sorted(Counter(str(source.get("source_type") or "unknown") for source in response["sources"]).items())),
+                "generation_error": bool(self.last_generation_error),
+            },
+        )
         return response
+
+    def _normalize_conversation_id(self, value: Optional[str]) -> str | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        normalized = re.sub(r"[^A-Za-z0-9_\-:.]", "", raw)
+        if not normalized:
+            return None
+        return normalized[:96]
+
+    def _load_conversation_state(self, session_id: str) -> dict[str, Any]:
+        state: dict[str, Any] = {
+            "session_id": session_id,
+            "summary": "",
+            "messages": [],
+        }
+        try:
+            session = storage.get_chat_session(session_id)
+            if session is None:
+                session = storage.upsert_chat_session(session_id, summary="")
+            state["summary"] = str(session.get("summary") or "").strip()
+            state["messages"] = storage.list_chat_messages(
+                session_id,
+                limit=max(2, int(config.CHAT_MEMORY_MAX_MESSAGES)),
+                ascending=True,
+            )
+        except Exception as exc:
+            logger.warning("Failed to load conversation state for %s: %s", session_id, exc)
+        return state
+
+    def _is_followup_question(self, question: str) -> bool:
+        text = str(question or "").strip().lower()
+        if not text:
+            return False
+        tokens = re.findall(r"[a-z0-9]+", text)
+        if not tokens:
+            return False
+        pronoun_markers = {
+            "it",
+            "its",
+            "they",
+            "them",
+            "their",
+            "those",
+            "these",
+            "that",
+            "this",
+            "he",
+            "she",
+            "his",
+            "her",
+            "former",
+            "latter",
+            "same",
+        }
+        bridge_prefixes = (
+            "and ",
+            "also ",
+            "what about",
+            "how about",
+            "why ",
+            "when ",
+            "where ",
+            "who ",
+            "which ",
+            "based on",
+            "on what basis",
+        )
+        if any(marker in tokens for marker in pronoun_markers):
+            return True
+        if any(text.startswith(prefix) for prefix in bridge_prefixes):
+            return True
+        return len(tokens) <= 8
+
+    def _compact_text(self, value: Any, max_chars: int) -> str:
+        cleaned = re.sub(r"\s+", " ", str(value or "").strip())
+        if max_chars > 0 and len(cleaned) > max_chars:
+            return cleaned[:max_chars].rstrip()
+        return cleaned
+
+    def _conversation_transcript(self, messages: list[dict], max_chars: int) -> str:
+        if not messages:
+            return ""
+        max_turns = max(2, int(config.CHAT_MEMORY_RECENT_TURNS) * 2)
+        lines: list[str] = []
+        budget = max(200, int(max_chars))
+        for msg in messages[-max_turns:]:
+            role = str(msg.get("role") or "user").strip().lower()
+            role_label = "assistant" if role == "assistant" else "user"
+            content = self._compact_text(msg.get("content"), 360)
+            if not content:
+                continue
+            line = f"{role_label}: {content}"
+            if lines and sum(len(item) for item in lines) + len(line) > budget:
+                break
+            lines.append(line)
+        return "\n".join(lines)
+
+    def _parse_json_object(self, raw: str) -> dict[str, Any] | None:
+        text = str(raw or "").strip()
+        if not text:
+            return None
+        candidate = text
+        match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+        if match:
+            candidate = match.group(0)
+        try:
+            payload = json.loads(candidate)
+        except Exception:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _heuristic_followup_rewrite(self, question: str, messages: list[dict]) -> str:
+        if not self._is_followup_question(question):
+            return question
+        prior_user_questions = [
+            self._compact_text(msg.get("content"), 260)
+            for msg in messages
+            if str(msg.get("role") or "").strip().lower() == "user"
+        ]
+        prior_user_questions = [item for item in prior_user_questions if item]
+        if not prior_user_questions:
+            return question
+        last_question = prior_user_questions[-1]
+        if last_question.lower() == str(question or "").strip().lower():
+            if len(prior_user_questions) >= 2:
+                last_question = prior_user_questions[-2]
+            else:
+                return question
+        return f"{question}. Context: {last_question}"
+
+    def _rewrite_question_with_conversation(self, question: str, state: dict[str, Any]) -> str:
+        text = str(question or "").strip()
+        if not text:
+            return text
+        messages = state.get("messages") if isinstance(state.get("messages"), list) else []
+        summary = str(state.get("summary") or "").strip()
+        if not messages:
+            return text
+        if not self._is_followup_question(text):
+            return text
+
+        transcript = self._conversation_transcript(messages, int(config.CHAT_MEMORY_REWRITE_MAX_CHARS))
+        if not transcript and not summary:
+            return text
+        if not (self.enable_vlm and self.model is not None):
+            return self._heuristic_followup_rewrite(text, messages)
+
+        prompt = (
+            "You rewrite follow-up questions for retrieval.\n"
+            "Return ONLY JSON with keys: standalone_question, confidence.\n"
+            "Rules:\n"
+            "- Keep intent unchanged.\n"
+            "- Resolve pronouns and omitted entities from conversation context.\n"
+            "- Keep the standalone question concise and specific.\n"
+            "- If already standalone, return it unchanged.\n\n"
+            f"Conversation summary:\n{summary or '(none)'}\n\n"
+            f"Recent conversation turns:\n{transcript or '(none)'}\n\n"
+            f"Current user question: {text}\n"
+            "JSON:"
+        )
+        try:
+            raw = self.model.generate_text(prompt, max_new_tokens=220)
+            parsed = self._parse_json_object(raw)
+            candidate = ""
+            if parsed:
+                candidate = self._compact_text(parsed.get("standalone_question"), 420)
+            if candidate:
+                return candidate
+        except Exception as exc:
+            logger.warning("Conversation rewrite failed; using heuristic rewrite. %s", exc)
+        return self._heuristic_followup_rewrite(text, messages)
+
+    def _fallback_summary_update(self, previous_summary: str, question: str, answer: str) -> str:
+        target = max(240, int(config.CHAT_MEMORY_SUMMARY_TARGET_CHARS))
+        cap = max(target, int(config.CHAT_MEMORY_SUMMARY_MAX_CHARS))
+        prior = self._compact_text(previous_summary, cap)
+        q = self._compact_text(question, 240)
+        a = self._compact_text(self._strip_document_summaries(answer), 360)
+        update = f"Q: {q} A: {a}"
+        merged = f"{prior} {update}".strip() if prior else update
+        if len(merged) <= cap:
+            return merged
+        return merged[-cap:].lstrip()
+
+    def _update_conversation_summary(
+        self,
+        previous_summary: str,
+        question: str,
+        answer: str,
+    ) -> str:
+        prior = self._compact_text(previous_summary, int(config.CHAT_MEMORY_SUMMARY_MAX_CHARS))
+        if not (self.enable_vlm and self.model is not None):
+            return self._fallback_summary_update(prior, question, answer)
+
+        target = max(240, int(config.CHAT_MEMORY_SUMMARY_TARGET_CHARS))
+        cap = max(target, int(config.CHAT_MEMORY_SUMMARY_MAX_CHARS))
+        prompt = (
+            "You maintain compact conversation memory for a document QA assistant.\n"
+            "Return plain text only.\n"
+            "Focus on user intent, named entities, constraints, open references, and unresolved follow-ups.\n"
+            "Exclude low-value filler and avoid repeating full answers.\n"
+            f"Target length: <= {target} characters.\n\n"
+            f"Previous memory summary:\n{prior or '(none)'}\n\n"
+            f"Latest user question:\n{self._compact_text(question, 300)}\n\n"
+            f"Latest assistant answer:\n{self._compact_text(self._strip_document_summaries(answer), 520)}\n\n"
+            "Updated memory summary:"
+        )
+        try:
+            summary = self._compact_text(self.model.generate_text(prompt, max_new_tokens=260), cap)
+            if summary:
+                return summary
+        except Exception as exc:
+            logger.warning("Conversation summary update failed; using fallback summary. %s", exc)
+        return self._fallback_summary_update(prior, question, answer)
+
+    def _persist_conversation_turn(
+        self,
+        session_id: str,
+        *,
+        question: str,
+        answer: str,
+        route: dict[str, Any],
+        intent: str,
+        resolved_question: str,
+    ) -> None:
+        if not session_id or not bool(config.CHAT_MEMORY_ENABLED):
+            return
+        try:
+            session = storage.upsert_chat_session(session_id, summary="")
+            now_iso = datetime.now(timezone.utc).isoformat()
+            question_text = self._compact_text(question, 2000)
+            answer_text = self._compact_text(answer, 12000)
+            if question_text:
+                storage.add_chat_message(
+                    message_id=str(uuid.uuid4()),
+                    session_id=session_id,
+                    role="user",
+                    content=question_text,
+                    created_at=now_iso,
+                    metadata={
+                        "intent": intent,
+                        "route_task_type": str(route.get("task_type") or "").strip().lower(),
+                        "resolved_question": resolved_question if resolved_question != question_text else "",
+                    },
+                )
+            if answer_text:
+                storage.add_chat_message(
+                    message_id=str(uuid.uuid4()),
+                    session_id=session_id,
+                    role="assistant",
+                    content=answer_text,
+                    created_at=now_iso,
+                    metadata={
+                        "intent": intent,
+                        "route_task_type": str(route.get("task_type") or "").strip().lower(),
+                    },
+                )
+            previous_summary = str(session.get("summary") or "").strip()
+            updated_summary = self._update_conversation_summary(previous_summary, question_text, answer_text)
+            storage.upsert_chat_session(
+                session_id,
+                summary=updated_summary,
+                metadata={
+                    "last_intent": intent,
+                    "last_route_task_type": str(route.get("task_type") or "").strip().lower(),
+                    "last_updated_at": now_iso,
+                },
+                merge_metadata=True,
+            )
+        except Exception as exc:
+            logger.warning("Failed to persist conversation turn for %s: %s", session_id, exc)
 
     def _build_context_blocks(self, chunks: List[dict]) -> List[str]:
         blocks: List[str] = []
@@ -357,6 +1087,166 @@ class ChatService:
             blocks.append(block)
             total += len(block)
         return blocks
+
+    def _select_evidence_spans(
+        self,
+        question: str,
+        chunks: List[dict],
+        *,
+        intent: str,
+    ) -> List[dict]:
+        if not chunks:
+            return []
+        entities = self._extract_query_entities(question)
+        selected: List[dict] = []
+        for chunk in chunks:
+            selected.append(
+                self._select_evidence_span_for_chunk(
+                    question,
+                    chunk,
+                    entities=entities,
+                    intent=intent,
+                )
+            )
+        return selected
+
+    def _candidate_evidence_spans(self, content: str) -> list[dict[str, Any]]:
+        normalized = re.sub(r"\s+", " ", str(content or "")).strip()
+        if not normalized:
+            return []
+
+        units = [
+            part.strip(" \t\r\n-")
+            for part in EVIDENCE_SENTENCE_SPLIT_RE.split(normalized)
+            if part and part.strip(" \t\r\n-")
+        ]
+        if not units:
+            units = [normalized]
+
+        candidates: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
+        def add_candidate(text: str, kind: str) -> None:
+            cleaned = re.sub(r"\s+", " ", str(text or "")).strip(" \t\r\n-")
+            if len(cleaned) < 18:
+                return
+            key = cleaned.lower()
+            if key in seen:
+                return
+            seen.add(key)
+            candidates.append({"text": cleaned, "kind": kind})
+
+        for unit in units:
+            add_candidate(unit, "sentence")
+            clauses = [
+                clause.strip(" \t\r\n-")
+                for clause in EVIDENCE_CLAUSE_SPLIT_RE.split(unit)
+                if clause and clause.strip(" \t\r\n-")
+            ]
+            if len(clauses) > 1:
+                for clause in clauses:
+                    add_candidate(clause, "clause")
+
+        for idx in range(len(units) - 1):
+            add_candidate(f"{units[idx]} {units[idx + 1]}", "window")
+
+        add_candidate(normalized, "full")
+        return candidates[:24]
+
+    def _score_evidence_span(
+        self,
+        question: str,
+        *,
+        span_text: str,
+        span_kind: str,
+        chunk_text: str,
+        chunk_score: float,
+        entities: list[str],
+    ) -> float:
+        span_overlap = self._chunk_query_overlap(question, span_text, entities=entities)
+        chunk_overlap = self._chunk_query_overlap(question, chunk_text, entities=entities)
+        query_terms = self._tokenize_for_match(question)
+        span_terms = self._tokenize_for_match(span_text)
+        exact_match_bonus = 0.0
+        compact_span = self._compact_lookup_value(span_text)
+        for entity in entities[:8]:
+            compact_entity = self._compact_lookup_value(entity)
+            if compact_entity and compact_entity in compact_span:
+                exact_match_bonus = max(exact_match_bonus, 0.12)
+                break
+        term_hit_ratio = 0.0
+        if query_terms and span_terms:
+            term_hit_ratio = len(query_terms.intersection(span_terms)) / float(max(1, len(span_terms)))
+
+        kind_penalty = {
+            "clause": 0.0,
+            "sentence": 0.01,
+            "window": 0.03,
+            "full": 0.08,
+        }.get(span_kind, 0.04)
+        length_penalty = min(0.12, max(0, len(span_text) - 190) / 900.0)
+
+        return max(
+            0.0,
+            (span_overlap * 0.64)
+            + (chunk_overlap * 0.14)
+            + (term_hit_ratio * 0.12)
+            + min(0.10, max(0.0, chunk_score) * 0.10)
+            + exact_match_bonus
+            - kind_penalty
+            - length_penalty,
+        )
+
+    def _select_evidence_span_for_chunk(
+        self,
+        question: str,
+        chunk: dict,
+        *,
+        entities: list[str],
+        intent: str,
+    ) -> dict:
+        content = re.sub(r"\s+", " ", str(chunk.get("content", ""))).strip()
+        if not content:
+            return chunk
+        source_type = str(chunk.get("source_type") or "").strip().lower()
+        if source_type not in EVIDENCE_SPAN_SOURCE_TYPES:
+            return chunk
+        if intent in {"compare", "trend_analysis"} and len(content) <= 220:
+            return chunk
+        if len(content) <= 180:
+            return chunk
+
+        candidates = self._candidate_evidence_spans(content)
+        if len(candidates) <= 1:
+            return chunk
+
+        chunk_score = float(chunk.get("rerank_score", chunk.get("score", 0.0)) or 0.0)
+        best = max(
+            candidates,
+            key=lambda candidate: self._score_evidence_span(
+                question,
+                span_text=str(candidate.get("text") or ""),
+                span_kind=str(candidate.get("kind") or "full"),
+                chunk_text=content,
+                chunk_score=chunk_score,
+                entities=entities,
+            ),
+        )
+        best_text = str(best.get("text") or "").strip()
+        best_kind = str(best.get("kind") or "full").strip().lower()
+        if not best_text or best_kind == "full" or best_text == content:
+            return chunk
+
+        updated = dict(chunk)
+        updated["content"] = best_text
+        metadata = chunk.get("metadata") if isinstance(chunk.get("metadata"), dict) else {}
+        updated["metadata"] = {
+            **metadata,
+            "selected_span": True,
+            "selected_span_type": best_kind,
+            "selected_span_text": best_text,
+        }
+        return updated
 
     def _normalize_retrieval_plan(
         self,
@@ -403,6 +1293,600 @@ class ChatService:
             route["retrieval_plan"]["per_doc_limit"] = per_doc_limit
 
         return retrieval_mode, route_top_k, per_doc_limit
+
+    def _retrieve_for_single_doc_qa(
+        self,
+        question: str,
+        *,
+        doc_ids: Optional[List[str]],
+        top_k: int,
+        mode: str,
+        prefer_exhaustive: bool = False,
+    ) -> List[dict]:
+        scoped = self._select_candidate_docs_for_query(
+            question,
+            doc_ids=doc_ids,
+            require_multi_doc=False,
+            prefer_recall=prefer_exhaustive,
+        )
+        scoped_doc_ids = scoped["doc_ids"] if scoped else doc_ids
+        chunks = self.retrieval.search(
+            question,
+            top_k=top_k,
+            doc_ids=scoped_doc_ids,
+            mode=mode,
+        )
+        if scoped and (
+            not bool(scoped.get("confident"))
+            or self._retrieval_confidence_low(question, chunks, min_docs=1)
+        ):
+            fallback_doc_ids = scoped["doc_ids"] if bool(scoped.get("confident")) else (doc_ids or [])
+            global_chunks = self.retrieval.search(
+                question,
+                top_k=top_k,
+                doc_ids=fallback_doc_ids or doc_ids,
+                mode=mode,
+            )
+            chunks = self._merge_chunks(chunks + global_chunks, limit=max(12, top_k * 3))
+        return chunks
+
+    def _compact_lookup_value(self, value: Any) -> str:
+        return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+    def _extract_query_date_targets(self, question: str) -> list[dict[str, str]]:
+        text = str(question or "")
+        targets: list[dict[str, str]] = []
+        seen: set[str] = set()
+
+        def add_target(raw_value: str, canonical_value: str) -> None:
+            compact = self._compact_lookup_value(canonical_value)
+            if not raw_value or not canonical_value or compact in seen:
+                return
+            seen.add(compact)
+            targets.append(
+                {
+                    "kind": "date",
+                    "raw": raw_value,
+                    "canonical": canonical_value,
+                    "compact": compact,
+                }
+            )
+
+        for match in ISO_DATE_RE.finditer(text):
+            year, month, day = (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+            try:
+                canonical = datetime(year, month, day).date().isoformat()
+            except Exception:
+                continue
+            add_target(match.group(0), canonical)
+
+        for match in DMY_MONTH_RE.finditer(text):
+            month = MONTH_NAME_TO_NUM.get(str(match.group(2) or "").strip().lower())
+            if month is None:
+                continue
+            try:
+                canonical = datetime(int(match.group(3)), month, int(match.group(1))).date().isoformat()
+            except Exception:
+                continue
+            add_target(match.group(0), canonical)
+
+        for match in MONTH_DY_RE.finditer(text):
+            month = MONTH_NAME_TO_NUM.get(str(match.group(1) or "").strip().lower())
+            if month is None:
+                continue
+            try:
+                canonical = datetime(int(match.group(3)), month, int(match.group(2))).date().isoformat()
+            except Exception:
+                continue
+            add_target(match.group(0), canonical)
+
+        return targets
+
+    def _extract_query_amount_targets(self, question: str) -> list[dict[str, str]]:
+        text = str(question or "")
+        targets: list[dict[str, str]] = []
+        seen: set[str] = set()
+
+        def add_target(raw_value: str, canonical_value: str) -> None:
+            compact = self._compact_lookup_value(canonical_value or raw_value)
+            if not raw_value or compact in seen:
+                return
+            seen.add(compact)
+            targets.append(
+                {
+                    "kind": "amount",
+                    "raw": raw_value,
+                    "canonical": canonical_value or raw_value,
+                    "compact": compact,
+                }
+            )
+
+        for match in QUERY_AMOUNT_RE.finditer(text):
+            raw_value = str(match.group(0) or "").strip()
+            if not raw_value:
+                continue
+            currency_key = ""
+            for raw_currency in (
+                match.group("currency_before"),
+                match.group("currency_after"),
+                match.group("symbol"),
+            ):
+                value = str(raw_currency or "").strip().lower()
+                if value:
+                    currency_key = value
+                    break
+            currency = QUERY_CURRENCY_CODE_MAP.get(currency_key, "")
+            number_text = str(match.group("number") or "").replace(",", "")
+            decimal_text = str(match.group("decimal") or "")
+            magnitude = str(match.group("magnitude") or "").strip().lower()
+            multiplier = Decimal("1")
+            if magnitude in {"k", "thousand"}:
+                multiplier = Decimal("1000")
+            elif magnitude in {"m", "million"}:
+                multiplier = Decimal("1000000")
+            elif magnitude in {"b", "billion"}:
+                multiplier = Decimal("1000000000")
+            try:
+                amount = (Decimal(number_text + decimal_text) if decimal_text else Decimal(number_text)) * multiplier
+            except (InvalidOperation, ValueError):
+                add_target(raw_value, raw_value)
+                continue
+            canonical_number = format(amount.normalize(), "f")
+            if "." in canonical_number:
+                canonical_number = canonical_number.rstrip("0").rstrip(".")
+            canonical_value = f"{currency} {canonical_number}".strip()
+            add_target(raw_value, canonical_value)
+        return targets
+
+    def _extract_contains_target_text(self, question: str) -> str:
+        text = str(question or "").strip()
+        if not text:
+            return ""
+        pattern = re.compile(
+            r"(?i)\b(?:contains?|mentions?|includes?|has|have|named)\b\s+(?P<body>[^?]+?)(?:\?|$)"
+        )
+        match = pattern.search(text)
+        if match is None:
+            return ""
+        body = str(match.group("body") or "").strip(" \t\r\n\"'`.,:;!?()[]{}")
+        if not body:
+            return ""
+        body = re.sub(
+            r"(?i)^(?:the\s+)?(?:exact\s+)?(?:date|amount|value|party|parties|counterparty|counterparties)\s+",
+            "",
+            body,
+        ).strip()
+        return body
+
+    def _looks_like_party_target(self, value: str) -> bool:
+        text = str(value or "").strip()
+        if not text:
+            return False
+        compact = self._compact_lookup_value(text)
+        if len(compact) < 4:
+            return False
+        tokens = re.findall(r"[A-Za-z][A-Za-z0-9&./'-]*", text)
+        if not tokens:
+            return False
+        lowered_tokens = [token.lower().rstrip(".") for token in tokens]
+        if any(token in ENTITY_SUFFIX_TOKENS for token in lowered_tokens):
+            return True
+        alpha_tokens = [token for token in tokens if re.search(r"[A-Za-z]", token)]
+        if len(alpha_tokens) >= 2 and not any(token.isdigit() for token in alpha_tokens):
+            return True
+        return any(token[:1].isupper() for token in alpha_tokens if token)
+
+    def _classify_exact_lookup_query(
+        self,
+        question: str,
+        *,
+        doc_ids: Optional[List[str]],
+        allow_compare: bool = False,
+        prefer_fact_lookup: bool = False,
+        fact_types_hint: Optional[List[str]] = None,
+    ) -> dict[str, Any]:
+        text = str(question or "").strip()
+        lowered = text.lower()
+        if not text:
+            return {
+                "applicable": False,
+                "reason": "empty_question",
+            }
+        if self._has_count_signal(question):
+            return {
+                "applicable": False,
+                "reason": "count_query",
+            }
+        if not allow_compare and self._detect_intent(question, doc_ids) == "compare":
+            return {
+                "applicable": False,
+                "reason": "compare_query",
+            }
+
+        wants_documents = any(marker in lowered for marker in EXACT_DOCUMENT_LOOKUP_MARKERS)
+        contains_signal = any(marker in lowered for marker in EXACT_CONTAINS_MARKERS)
+        date_targets = self._extract_query_date_targets(text)
+        amount_targets = self._extract_query_amount_targets(text)
+        target_values: list[dict[str, str]] = []
+        target_values.extend(date_targets)
+        target_values.extend(amount_targets)
+
+        raw_target_text = self._extract_contains_target_text(text) if (wants_documents or contains_signal) else ""
+        if raw_target_text and not date_targets and not amount_targets and self._looks_like_party_target(raw_target_text):
+            target_values.append(
+                {
+                    "kind": "party",
+                    "raw": raw_target_text,
+                    "canonical": raw_target_text,
+                    "compact": self._compact_lookup_value(raw_target_text),
+                }
+            )
+
+        fact_types: list[str] = []
+        if date_targets or any(hint in lowered for hint in FACT_DATE_HINTS):
+            fact_types.append("date")
+        if amount_targets or any(hint in lowered for hint in FACT_AMOUNT_HINTS):
+            fact_types.append("amount")
+        if any(item.get("kind") == "party" for item in target_values) or any(hint in lowered for hint in FACT_PARTY_HINTS):
+            fact_types.append("party")
+        for fact_type in fact_types_hint or []:
+            cleaned = str(fact_type or "").strip().lower()
+            if cleaned in {"date", "amount", "party"} and cleaned not in fact_types:
+                fact_types.append(cleaned)
+
+        if wants_documents and target_values:
+            return {
+                "applicable": True,
+                "mode": "document_contains",
+                "wants_documents": True,
+                "fact_types": fact_types or sorted({str(item.get("kind") or "").strip() for item in target_values if item.get("kind")}),
+                "targets": target_values,
+            }
+
+        direct_fact_markers = (
+            "what is",
+            "what are",
+            "who is",
+            "who are",
+            "when is",
+            "when was",
+            "what date",
+            "which date",
+            "what amount",
+            "what value",
+            "how much",
+        )
+        broad_semantic_markers = (
+            " where ",
+            " based ",
+            " location ",
+            " country ",
+            " countries ",
+            " address ",
+        )
+        non_exact_markers = (
+            "basis",
+            "considered",
+            "because",
+            "reason",
+            "why ",
+            "how ",
+        )
+        single_doc_scope = len([str(doc_id).strip() for doc_id in (doc_ids or []) if str(doc_id).strip()]) == 1
+        direct_fact_prompt = any(marker in lowered for marker in direct_fact_markers)
+        is_non_exact_prompt = any(marker in lowered for marker in non_exact_markers)
+        if fact_types and not is_non_exact_prompt and (
+            target_values
+            or direct_fact_prompt
+            or prefer_fact_lookup
+            or (allow_compare and bool(fact_types))
+            or (single_doc_scope and not any(marker in lowered for marker in broad_semantic_markers))
+        ):
+            return {
+                "applicable": True,
+                "mode": "fact_lookup",
+                "wants_documents": False,
+                "fact_types": sorted(set(fact_types)),
+                "targets": target_values,
+            }
+
+        return {
+            "applicable": False,
+            "reason": "no_exact_fact_signal",
+        }
+
+    def _score_exact_lookup_fact(
+        self,
+        question: str,
+        *,
+        fact: dict[str, Any],
+        lookup: dict[str, Any],
+    ) -> float:
+        fact_type = str(fact.get("fact_type") or "").strip().lower()
+        if lookup.get("fact_types") and fact_type not in set(lookup.get("fact_types") or []):
+            return 0.0
+        raw_value = str(fact.get("raw_value") or "").strip()
+        canonical_value = str(fact.get("canonical_value") or "").strip()
+        evidence_text = str(fact.get("evidence_text") or "").strip()
+        compact_candidates = {
+            self._compact_lookup_value(raw_value),
+            self._compact_lookup_value(canonical_value),
+            self._compact_lookup_value(evidence_text),
+        }
+        compact_candidates.discard("")
+        target_compacts = {
+            self._compact_lookup_value(str(target.get("canonical") or target.get("raw") or ""))
+            for target in (lookup.get("targets") or [])
+            if self._compact_lookup_value(str(target.get("canonical") or target.get("raw") or ""))
+        }
+        question_terms = self._tokenize_for_match(question)
+        fact_terms = self._tokenize_for_match(" ".join([raw_value, canonical_value, evidence_text]))
+        overlap = 0.0
+        if question_terms and fact_terms:
+            overlap = len(question_terms.intersection(fact_terms)) / float(max(1, len(question_terms)))
+
+        score = 0.22 + min(0.26, overlap * 0.52)
+        try:
+            score += min(0.12, max(0.0, float(fact.get("confidence") or 0.0)) * 0.12)
+        except Exception:
+            score += 0.0
+
+        if target_compacts:
+            if any(target == candidate for target in target_compacts for candidate in compact_candidates):
+                score += 0.48
+            elif any(target and target in candidate for target in target_compacts for candidate in compact_candidates):
+                score += 0.36
+            else:
+                return 0.0
+        elif fact_type in set(lookup.get("fact_types") or []):
+            score += 0.18
+
+        return float(max(0.0, min(1.0, score)))
+
+    def _search_exact_lookup_facts(
+        self,
+        question: str,
+        *,
+        doc_ids: Optional[List[str]],
+        lookup: dict[str, Any],
+        top_k: int,
+        per_doc_limit: int,
+    ) -> list[dict[str, Any]]:
+        fact_types = [str(value).strip().lower() for value in (lookup.get("fact_types") or []) if str(value).strip()]
+        try:
+            facts = storage.list_document_facts(
+                doc_ids=doc_ids,
+                fact_types=fact_types or None,
+            )
+        except Exception as exc:
+            logger.debug("Exact lookup skipped because document_facts is unavailable: %s", exc)
+            return []
+        matches: list[dict[str, Any]] = []
+        for fact in facts:
+            score = self._score_exact_lookup_fact(question, fact=fact, lookup=lookup)
+            if score <= 0.0:
+                continue
+            matches.append({"fact": fact, "score": score})
+        matches.sort(key=lambda item: float(item.get("score") or 0.0), reverse=True)
+
+        if not bool(lookup.get("wants_documents")):
+            deduped: list[dict[str, Any]] = []
+            seen: set[tuple[str, str, str]] = set()
+            for item in matches:
+                fact = item["fact"]
+                key = (
+                    str(fact.get("doc_id") or "").strip(),
+                    str(fact.get("fact_type") or "").strip().lower(),
+                    self._compact_lookup_value(str(fact.get("canonical_value") or fact.get("raw_value") or "")),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped.append(item)
+                if len(deduped) >= max(top_k, per_doc_limit * 3):
+                    break
+            return deduped
+
+        best_by_doc: dict[str, dict[str, Any]] = {}
+        for item in matches:
+            fact = item["fact"]
+            doc_id = str(fact.get("doc_id") or "").strip()
+            if not doc_id:
+                continue
+            previous = best_by_doc.get(doc_id)
+            if previous is None or float(item.get("score") or 0.0) > float(previous.get("score") or 0.0):
+                best_by_doc[doc_id] = item
+        ranked = sorted(best_by_doc.values(), key=lambda item: float(item.get("score") or 0.0), reverse=True)
+        return ranked[: max(top_k, per_doc_limit)]
+
+    def _fact_match_to_chunk(
+        self,
+        match: dict[str, Any],
+        *,
+        doc_cache: dict[str, dict[str, Any]],
+        wants_documents: bool,
+    ) -> dict[str, Any]:
+        fact = match["fact"]
+        doc_id = str(fact.get("doc_id") or "").strip()
+        doc = doc_cache.get(doc_id)
+        if doc is None and doc_id:
+            doc = storage.get_document(doc_id) or {}
+            doc_cache[doc_id] = doc
+        fact_type = str(fact.get("fact_type") or "").strip().lower() or "fact"
+        raw_value = str(fact.get("raw_value") or "").strip()
+        canonical_value = str(fact.get("canonical_value") or "").strip()
+        value_text = raw_value or canonical_value
+        if canonical_value and self._compact_lookup_value(canonical_value) != self._compact_lookup_value(raw_value):
+            value_text = f"{value_text} (canonical: {canonical_value})"
+        evidence_text = str(fact.get("evidence_text") or "").strip()
+        prefix = "Matched" if wants_documents else "Extracted"
+        return {
+            "id": f"fact:{fact.get('id')}",
+            "doc_id": doc_id,
+            "doc_filename": str((doc or {}).get("filename") or ""),
+            "doc_created_at": str((doc or {}).get("created_at") or ""),
+            "page": fact.get("page"),
+            "content": f"{prefix} {fact_type}: {value_text}. Evidence: {evidence_text}",
+            "score": float(match.get("score") or 0.0),
+            "source_type": "document_fact",
+            "metadata": {
+                "fact_id": str(fact.get("id") or ""),
+                "fact_type": fact_type,
+                "canonical_value": canonical_value,
+                "raw_value": raw_value,
+                "chunk_id": str(fact.get("chunk_id") or ""),
+                "fact_confidence": float(fact.get("confidence") or 0.0),
+            },
+        }
+
+    def _exact_lookup_fallback_chunks(
+        self,
+        question: str,
+        *,
+        doc_ids: Optional[List[str]],
+        top_k: int,
+        per_doc_limit: int,
+        mode: str,
+        needs_cross_doc: bool,
+        prefer_exhaustive: bool,
+        wants_documents: bool,
+    ) -> list[dict]:
+        if wants_documents or needs_cross_doc or len(doc_ids or []) > 1:
+            return self._retrieve_for_cross_doc_qa(
+                question,
+                doc_ids=doc_ids,
+                top_k=top_k,
+                per_doc_limit=per_doc_limit,
+                mode=mode,
+                prefer_exhaustive=prefer_exhaustive,
+            )
+        return self._retrieve_for_single_doc_qa(
+            question,
+            doc_ids=doc_ids,
+            top_k=top_k,
+            mode=mode,
+            prefer_exhaustive=prefer_exhaustive,
+        )
+
+    def _retrieve_for_exact_lookup(
+        self,
+        question: str,
+        *,
+        doc_ids: Optional[List[str]],
+        top_k: int,
+        per_doc_limit: int,
+        mode: str,
+        needs_cross_doc: bool,
+        prefer_exhaustive: bool,
+        allow_compare: bool = False,
+        include_fallback: bool = True,
+        fact_types_hint: Optional[List[str]] = None,
+        prefer_fact_lookup: bool = False,
+    ) -> tuple[list[dict] | None, dict[str, Any]]:
+        lookup = self._classify_exact_lookup_query(
+            question,
+            doc_ids=doc_ids,
+            allow_compare=allow_compare,
+            prefer_fact_lookup=prefer_fact_lookup,
+            fact_types_hint=fact_types_hint,
+        )
+        if not bool(lookup.get("applicable")):
+            info = dict(lookup)
+            info.setdefault("applicable", False)
+            info["used_fact_lookup"] = False
+            info["used_hybrid_fallback"] = False
+            return None, info
+
+        matches = self._search_exact_lookup_facts(
+            question,
+            doc_ids=doc_ids,
+            lookup=lookup,
+            top_k=top_k,
+            per_doc_limit=per_doc_limit,
+        )
+        doc_cache: dict[str, dict[str, Any]] = {}
+        fact_chunks = [
+            self._fact_match_to_chunk(
+                match,
+                doc_cache=doc_cache,
+                wants_documents=bool(lookup.get("wants_documents")),
+            )
+            for match in matches
+        ]
+
+        info = {
+            "applicable": True,
+            "mode": str(lookup.get("mode") or "fact_lookup"),
+            "fact_types": list(lookup.get("fact_types") or []),
+            "targets": [str(item.get("raw") or item.get("canonical") or "").strip() for item in (lookup.get("targets") or [])],
+            "fact_match_count": len(matches),
+            "used_fact_lookup": True,
+            "used_hybrid_fallback": False,
+            "reason": "",
+        }
+        matched_doc_ids = {
+            str((match.get("fact") or {}).get("doc_id") or "").strip()
+            for match in matches
+            if str((match.get("fact") or {}).get("doc_id") or "").strip()
+        }
+        required_doc_count = 2 if allow_compare else 1
+        info["matched_doc_count"] = len(matched_doc_ids)
+        info["required_doc_count"] = required_doc_count
+        if not matches:
+            info["strength"] = "empty"
+            info["reason"] = "no_fact_matches"
+            if not include_fallback:
+                return [], info
+            info["used_hybrid_fallback"] = True
+            return (
+                self._exact_lookup_fallback_chunks(
+                    question,
+                    doc_ids=doc_ids,
+                    top_k=top_k,
+                    per_doc_limit=per_doc_limit,
+                    mode=mode,
+                    needs_cross_doc=needs_cross_doc,
+                    prefer_exhaustive=prefer_exhaustive,
+                    wants_documents=bool(lookup.get("wants_documents")),
+                ),
+                info,
+            )
+
+        best_score = max(float(match.get("score") or 0.0) for match in matches)
+        if lookup.get("targets"):
+            strong = best_score >= 0.72
+        else:
+            strong = best_score >= 0.42
+        if allow_compare and len(matched_doc_ids) < required_doc_count:
+            strong = False
+            info["reason"] = "insufficient_doc_coverage"
+        info["strength"] = "strong" if strong else "weak"
+        info["best_score"] = round(best_score, 4)
+
+        limited_fact_chunks = fact_chunks[: max(top_k, per_doc_limit * 2)]
+        if strong:
+            return limited_fact_chunks, info
+
+        if not include_fallback:
+            return limited_fact_chunks, info
+        info["used_hybrid_fallback"] = True
+        if not info["reason"]:
+            info["reason"] = "weak_fact_signal"
+        fallback_chunks = self._exact_lookup_fallback_chunks(
+            question,
+            doc_ids=doc_ids,
+            top_k=top_k,
+            per_doc_limit=per_doc_limit,
+            mode=mode,
+            needs_cross_doc=needs_cross_doc,
+            prefer_exhaustive=prefer_exhaustive,
+            wants_documents=bool(lookup.get("wants_documents")),
+        )
+        merged = self._merge_chunks(
+            limited_fact_chunks + fallback_chunks,
+            limit=max(14, top_k * 3),
+        )
+        return merged, info
 
     def _metadata_answer_type_for_operation(self, operation: str) -> str:
         op = str(operation or "").strip().lower()
@@ -1118,6 +2602,150 @@ class ChatService:
         overlap = len(target_terms.intersection(haystack_terms))
         return overlap >= max(1, int(round(0.6 * len(target_terms))))
 
+    def _route_exact_lookup_hint(self, route: dict[str, Any]) -> dict[str, Any]:
+        analysis_plan = route.get("analysis_plan") if isinstance(route.get("analysis_plan"), dict) else {}
+        fact_types = [
+            str(value).strip().lower()
+            for value in (analysis_plan.get("fact_types") or [])
+            if str(value).strip().lower() in {"date", "amount", "party"}
+        ]
+        return {
+            "requested": bool(analysis_plan.get("exact_lookup_requested", False) or fact_types),
+            "fact_types": fact_types,
+        }
+
+    def _resolve_route_target_doc_ids(
+        self,
+        route: dict[str, Any],
+        docs: list[dict],
+        *,
+        min_resolved: int = 1,
+    ) -> list[str]:
+        if not docs or not isinstance(route, dict):
+            return []
+        analysis_plan = route.get("analysis_plan") if isinstance(route.get("analysis_plan"), dict) else {}
+        task_type = str(route.get("task_type") or "").strip().lower()
+        metadata_filters = analysis_plan.get("metadata_filters") if isinstance(analysis_plan.get("metadata_filters"), dict) else {}
+        raw_targets: list[str] = []
+        seen_targets: set[str] = set()
+
+        def add_target(value: Any) -> None:
+            cleaned = re.sub(r"\s+", " ", str(value or "").strip())
+            key = cleaned.lower()
+            if len(cleaned) < 3 or key in seen_targets:
+                return
+            seen_targets.add(key)
+            raw_targets.append(cleaned)
+
+        for value in analysis_plan.get("target_documents") or []:
+            add_target(value)
+        add_target(metadata_filters.get("target_document"))
+        if task_type == "compare":
+            for value in analysis_plan.get("query_entities") or []:
+                add_target(value)
+
+        resolved: list[str] = []
+        seen_doc_ids: set[str] = set()
+        for target in raw_targets[:6]:
+            matched = [doc for doc in docs if self._doc_matches_target_document(doc, target)]
+            if not matched or len(matched) > max(4, min(6, len(docs))):
+                continue
+            for doc in matched:
+                doc_id = str(doc.get("id") or "").strip()
+                if not doc_id or doc_id in seen_doc_ids:
+                    continue
+                seen_doc_ids.add(doc_id)
+                resolved.append(doc_id)
+        return resolved if len(resolved) >= min_resolved else []
+
+    def _is_summary_like_query(self, question: str) -> bool:
+        text = str(question or "").strip().lower()
+        if not text:
+            return False
+        return bool(SUMMARY_ROUTE_PREFIX_RE.match(text) or SUMMARY_ROUTE_WHAT_SAY_RE.match(text))
+
+    def _extract_summary_target_text(self, question: str) -> str:
+        text = str(question or "").strip()
+        if not text:
+            return ""
+        match = SUMMARY_ROUTE_PREFIX_RE.match(text) or SUMMARY_ROUTE_WHAT_SAY_RE.match(text)
+        if match is None:
+            return ""
+        body = re.sub(r"\s+", " ", str(match.group("body") or "").strip(" \t\r\n\"'`.,:;!?()[]{}"))
+        if not body:
+            return ""
+        generic = {
+            "document",
+            "doc",
+            "file",
+            "agreement",
+            "nda",
+            "this document",
+            "that document",
+            "this agreement",
+            "that agreement",
+        }
+        return "" if body.lower() in generic else body
+
+    def _repair_named_document_summary_route_if_needed(
+        self,
+        question: str,
+        route: dict[str, Any],
+        *,
+        doc_ids: Optional[List[str]],
+    ) -> dict[str, Any]:
+        if not isinstance(route, dict):
+            return route
+        task_type = str(route.get("task_type") or "").strip().lower()
+        if task_type not in {"qa", "summarize"} or not bool(route.get("needs_cross_doc", False)):
+            return route
+        if self._detect_intent(question, doc_ids) == "compare":
+            return route
+        selected_doc_ids = [str(doc_id).strip() for doc_id in (doc_ids or []) if str(doc_id).strip()]
+        if len(selected_doc_ids) >= 2 or not self._is_summary_like_query(question):
+            return route
+
+        scoped_docs = self._documents_in_scope(doc_ids)
+        target_doc_ids = self._resolve_route_target_doc_ids(route, scoped_docs, min_resolved=1)
+        if len(target_doc_ids) != 1:
+            target_text = self._extract_summary_target_text(question)
+            if target_text:
+                matched = [doc for doc in scoped_docs if self._doc_matches_target_document(doc, target_text)]
+                if len(matched) == 1:
+                    target_doc_ids = [str(matched[0].get("id") or "").strip()]
+        if len(target_doc_ids) != 1:
+            return route
+
+        repaired = dict(route)
+        repaired["task_type"] = "qa"
+        repaired["needs_cross_doc"] = False
+        repaired["source"] = "llm_router_named_doc_summary_repair"
+        repaired["rationale"] = "Named-document summary request repaired to single-document retrieval."
+
+        retrieval_plan = repaired.get("retrieval_plan") if isinstance(repaired.get("retrieval_plan"), dict) else {}
+        updated_plan = dict(retrieval_plan)
+        updated_plan["strategy"] = "semantic"
+        try:
+            updated_plan["top_k"] = max(6, int(updated_plan.get("top_k", 8) or 8))
+        except Exception:
+            updated_plan["top_k"] = 8
+        try:
+            updated_plan["per_doc_limit"] = max(1, int(updated_plan.get("per_doc_limit", 1) or 1))
+        except Exception:
+            updated_plan["per_doc_limit"] = 1
+        repaired["retrieval_plan"] = updated_plan
+
+        analysis_plan = repaired.get("analysis_plan") if isinstance(repaired.get("analysis_plan"), dict) else {}
+        updated_analysis = dict(analysis_plan)
+        if not updated_analysis.get("target_documents"):
+            target_doc = next((doc for doc in scoped_docs if str(doc.get("id") or "").strip() == target_doc_ids[0]), None)
+            if target_doc is not None:
+                updated_analysis["target_documents"] = [
+                    str(target_doc.get("filename") or (target_doc.get("metadata") or {}).get("title") or target_doc_ids[0])
+                ]
+        repaired["analysis_plan"] = updated_analysis
+        return repaired
+
     def _rank_documents_for_target(self, target: str, docs: list[dict]) -> list[dict]:
         query = str(target or "").strip().lower()
         if not query:
@@ -1157,6 +2785,579 @@ class ChatService:
             scored.append((score, doc))
         return [item[1] for item in sorted(scored, key=lambda current: current[0], reverse=True)]
 
+    def _metadata_reference_now(self) -> datetime:
+        return datetime.now(timezone.utc)
+
+    def _answer_metadata_or_hybrid_query(
+        self,
+        question: str,
+        *,
+        doc_ids: Optional[List[str]],
+        metadata_signal: dict[str, Any],
+    ) -> tuple[str, list[dict], dict[str, Any]]:
+        query_intent = self._build_query_intent(question, metadata_signal)
+        if not bool(config.HYBRID_METADATA_SEMANTIC):
+            answer, sources = self._answer_metadata_query(
+                question,
+                doc_ids=doc_ids,
+                metadata_signal=metadata_signal,
+            )
+            return answer, sources, query_intent
+        if str(query_intent.get("answer_mode") or "METADATA_ONLY") == "METADATA_ONLY":
+            answer, sources = self._answer_metadata_query(
+                question,
+                doc_ids=doc_ids,
+                metadata_signal=metadata_signal,
+            )
+            return answer, sources, query_intent
+        answer, sources = self._answer_hybrid_metadata_semantic_query(
+            question,
+            doc_ids=doc_ids,
+            metadata_signal=metadata_signal,
+            query_intent=query_intent,
+        )
+        return answer, sources, query_intent
+
+    def _metadata_terms_for_intent(
+        self,
+        operation: str,
+        filters: dict[str, Any],
+    ) -> set[str]:
+        terms = set(self._tokenize_for_match(operation.replace("_", " ")))
+        for field in QUERY_INTENT_METADATA_FIELDS:
+            terms.update(self._tokenize_for_match(field.replace("_", " ")))
+        for value in filters.values():
+            terms.update(self._tokenize_for_match(str(value or "")))
+            candidate_types = extract_query_doc_type_candidates(str(value or ""))
+            for doc_type in candidate_types:
+                terms.update(self._tokenize_for_match(doc_type.replace("_", " ")))
+                for hint in DOC_TYPE_HINTS.get(doc_type, []):
+                    terms.update(self._tokenize_for_match(hint))
+        return terms
+
+    def _build_query_intent(
+        self,
+        question: str,
+        metadata_signal: dict[str, Any],
+    ) -> dict[str, Any]:
+        filters = dict(metadata_signal.get("filters") or {}) if isinstance(metadata_signal.get("filters"), dict) else {}
+        hard_filters = {key: value for key, value in filters.items() if str(value).strip()}
+        soft_filters: dict[str, Any] = {}
+        operation = str(metadata_signal.get("operation") or "list").strip().lower()
+        if operation not in METADATA_OPERATIONS:
+            operation = "list"
+        expected_answer_type = str(metadata_signal.get("expected_answer_type") or "").strip().lower()
+        query_terms = self._tokenize_for_match(question)
+        metadata_terms = self._metadata_terms_for_intent(operation, hard_filters)
+        semantic_terms = sorted(
+            {
+                term
+                for term in query_terms
+                if term not in metadata_terms and term not in QUERY_INTENT_NON_SEMANTIC_TERMS
+            }
+        )
+        query_years = sorted({year for year in YEAR_RE.findall(question)})
+        semantic_classes: set[str] = set()
+        if set(semantic_terms).intersection(SEMANTIC_TEMPORAL_TERMS):
+            semantic_classes.add("temporal")
+        if set(semantic_terms).intersection(SEMANTIC_PARTY_TERMS):
+            semantic_classes.add("party")
+        if set(semantic_terms).intersection(STATUS_EXPIRED_TERMS.union(STATUS_ACTIVE_TERMS)):
+            semantic_classes.add("status")
+        if query_years:
+            semantic_classes.add("year")
+        if semantic_terms and not semantic_classes:
+            semantic_classes.add("content")
+
+        semantic_targets: list[str] = []
+        if "status" in semantic_classes:
+            semantic_targets.append("derived_status")
+        if "temporal" in semantic_classes or "year" in semantic_classes:
+            semantic_targets.append("temporal_facts")
+        if "party" in semantic_classes:
+            semantic_targets.append("party_entities")
+        if "content" in semantic_classes:
+            semantic_targets.append("content_facts")
+        if query_years and not {"date_from", "date_to", "relative_days"}.intersection(hard_filters):
+            if "year_inference" not in semantic_targets:
+                semantic_targets.append("year_inference")
+        if query_years and {"date_from", "date_to"}.intersection(hard_filters):
+            for key in ("date_from", "date_to"):
+                value = hard_filters.pop(key, None)
+                if value is not None:
+                    soft_filters[key] = value
+
+        requires_semantic = bool(semantic_targets)
+        if operation not in GENERIC_METADATA_OPERATIONS and not requires_semantic:
+            answer_mode = "METADATA_ONLY"
+        elif not requires_semantic:
+            answer_mode = "METADATA_ONLY"
+        elif hard_filters:
+            answer_mode = "HYBRID"
+        else:
+            answer_mode = "SEMANTIC_ONLY"
+        if expected_answer_type == "person" and operation in PERSON_METADATA_OPERATIONS:
+            answer_mode = "METADATA_ONLY"
+            requires_semantic = False
+            semantic_targets = []
+        status_target = ""
+        lowered_question = str(question or "").lower()
+        negative_active_pattern = re.search(
+            r"\b(?:no|not)\s+(?:longer\s+)?(?:valid|active|effective|enforceable)\b",
+            lowered_question,
+        )
+        expired_hits = len(set(semantic_terms).intersection(STATUS_EXPIRED_TERMS))
+        active_hits = len(set(semantic_terms).intersection(STATUS_ACTIVE_TERMS))
+        if negative_active_pattern is not None:
+            status_target = "expired"
+        elif expired_hits > active_hits and expired_hits > 0:
+            status_target = "expired"
+        elif active_hits > expired_hits and active_hits > 0:
+            status_target = "active"
+        covered = len(set(query_terms).intersection(metadata_terms))
+        query_count = max(1, len(query_terms))
+        metadata_coverage = covered / float(query_count)
+        confidence = max(0.05, min(0.99, 0.35 + (0.45 * metadata_coverage) + (0.15 if not requires_semantic else 0.0)))
+        return {
+            "hard_filters": hard_filters,
+            "soft_filters": soft_filters,
+            "semantic_targets": semantic_targets,
+            "requires_semantic": requires_semantic,
+            "answer_mode": answer_mode,
+            "confidence": round(float(confidence), 4),
+            "semantic_terms": semantic_terms,
+            "query_years": query_years,
+            "semantic_classes": sorted(semantic_classes),
+            "status_target": status_target,
+            "operation": operation,
+        }
+
+    def _answer_hybrid_metadata_semantic_query(
+        self,
+        question: str,
+        *,
+        doc_ids: Optional[List[str]],
+        metadata_signal: dict[str, Any],
+        query_intent: dict[str, Any],
+    ) -> tuple[str, list[dict]]:
+        operation = str(metadata_signal.get("operation") or "list").strip().lower()
+        if operation not in METADATA_OPERATIONS:
+            operation = "list"
+        filters = dict(metadata_signal.get("filters") or {}) if isinstance(metadata_signal.get("filters"), dict) else {}
+        if operation == "external_collaborators":
+            filters["collaborator_type"] = "external"
+        if operation == "authored_by" and not filters.get("author") and filters.get("target_document"):
+            filters["author"] = str(filters.get("target_document") or "").strip()
+        if operation == "edited_by" and not filters.get("last_modified_by") and filters.get("target_document"):
+            filters["last_modified_by"] = str(filters.get("target_document") or "").strip()
+
+        all_docs = self.metadata_semantic_adapter.list_documents(doc_ids=doc_ids)
+        if not all_docs:
+            return "I cannot find documents in the current scope.", []
+
+        hard_filters = dict(query_intent.get("hard_filters") or {})
+        candidate_docs = (
+            self._filter_documents_by_metadata(all_docs, operation=operation, filters=hard_filters)
+            if hard_filters
+            else list(all_docs)
+        )
+        scope_relaxed = False
+        if not candidate_docs:
+            scope_relaxed = True
+            candidate_docs = list(all_docs)
+        ranked_candidates = sorted(
+            candidate_docs,
+            key=lambda item: self._doc_updated_at(item) or self._doc_created_at(item) or datetime.min.replace(tzinfo=timezone.utc),
+            reverse=True,
+        )
+        candidate_docs = ranked_candidates[: int(config.HYBRID_METADATA_MAX_CANDIDATES)]
+        candidate_doc_ids = [str(doc.get("id") or "").strip() for doc in candidate_docs if str(doc.get("id") or "").strip()]
+        if not candidate_doc_ids:
+            return "I cannot find documents in the current scope.", []
+
+        chunks, evidence_score, did_retry = self._retrieve_hybrid_semantic_chunks(
+            question,
+            candidate_doc_ids=candidate_doc_ids,
+            semantic_terms=list(query_intent.get("semantic_terms") or []),
+        )
+        if not chunks:
+            fallback_answer, fallback_sources = self._answer_metadata_query(
+                question,
+                doc_ids=doc_ids,
+                metadata_signal=metadata_signal,
+            )
+            return fallback_answer, fallback_sources
+
+        matched_docs, evidence_chunks, facts_by_doc = self._match_documents_from_hybrid_evidence(
+            question,
+            candidate_docs=candidate_docs,
+            chunks=chunks,
+            query_intent=query_intent,
+        )
+        if not matched_docs:
+            answer = self._fallback_answer(
+                question,
+                chunks,
+                intent="qa",
+                include_document_summaries=False,
+            )
+            if scope_relaxed:
+                answer = (
+                    "I expanded scope beyond strict metadata filters because no candidate documents matched those filters.\n"
+                    + answer
+                )
+            return answer, self._prepare_response_sources(chunks, intent="qa")
+
+        answer = self._build_hybrid_metadata_answer(
+            matched_docs=matched_docs,
+            facts_by_doc=facts_by_doc,
+            query_intent=query_intent,
+            evidence_score=evidence_score,
+            did_retry=did_retry,
+            scope_relaxed=scope_relaxed,
+        )
+        return answer, self._prepare_response_sources(evidence_chunks, intent="qa")
+
+    def _retrieve_hybrid_semantic_chunks(
+        self,
+        question: str,
+        *,
+        candidate_doc_ids: list[str],
+        semantic_terms: list[str],
+    ) -> tuple[list[dict], float, bool]:
+        return self.metadata_semantic_adapter.search_chunks_with_expansion(
+            query=question,
+            doc_ids=candidate_doc_ids,
+            top_k=int(config.HYBRID_METADATA_TOP_K),
+            per_doc_limit=int(config.HYBRID_METADATA_PER_DOC_LIMIT),
+            mode="hybrid",
+            semantic_terms=semantic_terms,
+            min_evidence_score=float(config.HYBRID_METADATA_MIN_EVIDENCE_SCORE),
+            evidence_scorer=self._hybrid_evidence_score,
+            merge_chunks=self._merge_chunks,
+            merged_limit=max(20, int(config.HYBRID_METADATA_TOP_K) * 2),
+            fallback_expansion_terms=list(SEMANTIC_EXPANSION_TERMS),
+        )
+
+    def _hybrid_evidence_score(self, question: str, chunks: list[dict]) -> float:
+        if not chunks:
+            return 0.0
+        scored = sorted(
+            chunks,
+            key=lambda item: float(item.get("rerank_score", item.get("score", 0.0)) or 0.0),
+            reverse=True,
+        )[:12]
+        support = 0.0
+        for chunk in scored:
+            overlap = self._chunk_query_overlap(question, str(chunk.get("content") or ""))
+            score = float(chunk.get("rerank_score", chunk.get("score", 0.0)) or 0.0)
+            support += max(overlap, score)
+        unique_docs = {
+            str(chunk.get("doc_id") or "").strip()
+            for chunk in scored
+            if str(chunk.get("doc_id") or "").strip()
+        }
+        diversity_bonus = min(0.35, float(len(unique_docs)) * 0.08)
+        normalized_support = support / float(max(1, len(scored)))
+        return float(max(0.0, min(1.0, normalized_support + diversity_bonus)))
+
+    def _extract_dates_with_roles(self, text: str) -> list[dict[str, Any]]:
+        normalized = str(text or "")
+        if not normalized:
+            return []
+        results: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for match in ISO_DATE_RE.finditer(normalized):
+            year, month, day = match.groups()
+            try:
+                dt = datetime(int(year), int(month), int(day), tzinfo=timezone.utc)
+            except Exception:
+                continue
+            key = dt.isoformat()
+            if key in seen:
+                continue
+            seen.add(key)
+            context = normalized[max(0, match.start() - 96) : match.start()].lower()
+            role = "unspecified"
+            context_terms = self._tokenize_for_match(context.replace("-", "_"))
+            for candidate_role, role_terms in DATE_ROLE_TERMS.items():
+                if context_terms.intersection(role_terms):
+                    role = candidate_role
+                    break
+            results.append({"datetime": dt, "role": role, "value": match.group(0)})
+        for regex in (DMY_MONTH_RE, MONTH_DY_RE):
+            for match in regex.finditer(normalized):
+                if regex is DMY_MONTH_RE:
+                    day_raw, month_raw, year_raw = match.groups()
+                else:
+                    month_raw, day_raw, year_raw = match.groups()
+                month = MONTH_NAME_TO_NUM.get(str(month_raw).strip().lower(), 0)
+                if month <= 0:
+                    continue
+                try:
+                    dt = datetime(int(year_raw), int(month), int(day_raw), tzinfo=timezone.utc)
+                except Exception:
+                    continue
+                key = dt.isoformat()
+                if key in seen:
+                    continue
+                seen.add(key)
+                context = normalized[max(0, match.start() - 96) : match.start()].lower()
+                role = "unspecified"
+                context_terms = self._tokenize_for_match(context.replace("-", "_"))
+                for candidate_role, role_terms in DATE_ROLE_TERMS.items():
+                    if context_terms.intersection(role_terms):
+                        role = candidate_role
+                        break
+                results.append({"datetime": dt, "role": role, "value": match.group(0)})
+        return sorted(results, key=lambda item: item["datetime"])
+
+    def _extract_party_mentions(self, text: str) -> list[str]:
+        normalized = str(text or "")
+        if not normalized:
+            return []
+        parties: list[str] = []
+        seen: set[str] = set()
+        patterns = (
+            re.compile(
+                r"\b(?:between|by and between)\s+([A-Z][A-Za-z0-9&.,'()\- ]{2,80}?)\s+and\s+([A-Z][A-Za-z0-9&.,'()\- ]{2,80}?)(?:[\n\r.,;]|$)"
+            ),
+            re.compile(r"\b(?:party|counterparty|customer|client|vendor|supplier)\s*[:\-]\s*([A-Z][A-Za-z0-9&.,'()\- ]{2,90})"),
+        )
+        for pattern in patterns:
+            for match in pattern.finditer(normalized):
+                for group_idx in range(1, len(match.groups()) + 1):
+                    value = re.sub(r"\s+", " ", str(match.group(group_idx) or "").strip(" \t\r\n,.;:"))
+                    if len(value) < 3:
+                        continue
+                    lowered = value.lower()
+                    if lowered in seen:
+                        continue
+                    seen.add(lowered)
+                    parties.append(value)
+        return parties[:12]
+
+    def _extract_semantic_facts_for_doc(
+        self,
+        doc: dict[str, Any],
+        doc_chunks: list[dict],
+    ) -> dict[str, Any]:
+        combined_text = " ".join(str(chunk.get("content") or "") for chunk in doc_chunks[:12])
+        dates = self._extract_dates_with_roles(combined_text)
+        parties = self._extract_party_mentions(combined_text)
+        now = self._metadata_reference_now()
+        effective_dates = [item["datetime"] for item in dates if str(item.get("role")) == "effective"]
+        execution_dates = [item["datetime"] for item in dates if str(item.get("role")) == "execution"]
+        termination_dates = [item["datetime"] for item in dates if str(item.get("role")) == "termination"]
+        text_years = {str(item["datetime"].year) for item in dates}
+        metadata_years: set[str] = set()
+        metadata = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
+        created_dt = self._doc_created_at(doc)
+        updated_dt = self._doc_updated_at(doc)
+        if created_dt is not None:
+            metadata_years.add(str(created_dt.year))
+        if updated_dt is not None:
+            metadata_years.add(str(updated_dt.year))
+        years = set(text_years).union(metadata_years)
+        status = "unknown"
+        if termination_dates:
+            latest_termination = sorted(termination_dates)[-1]
+            status = "expired" if latest_termination < now else "active"
+        elif effective_dates:
+            earliest_effective = sorted(effective_dates)[0]
+            status = "active" if earliest_effective <= now else "unknown"
+        combined_terms = self._tokenize_for_match(combined_text)
+        if status == "unknown":
+            if combined_terms.intersection(STATUS_EXPIRED_TERMS):
+                status = "expired"
+            elif combined_terms.intersection(STATUS_ACTIVE_TERMS):
+                status = "active"
+        status_terms = {status} if status != "unknown" else set()
+        party_terms: set[str] = set()
+        for party in parties:
+            party_terms.update(self._tokenize_for_match(party))
+        fact_terms = set(combined_terms)
+        fact_terms.update({year for year in years if year})
+        fact_terms.update(status_terms)
+        fact_terms.update(party_terms)
+        return {
+            "status": status,
+            "years": sorted(years),
+            "text_years": sorted(text_years),
+            "metadata_years": sorted(metadata_years),
+            "parties": parties,
+            "effective_dates": effective_dates,
+            "execution_dates": execution_dates,
+            "termination_dates": termination_dates,
+            "fact_terms": fact_terms,
+            "author": str(metadata.get("author") or "").strip(),
+        }
+
+    def _semantic_doc_match_score(
+        self,
+        question: str,
+        *,
+        query_intent: dict[str, Any],
+        doc_chunks: list[dict],
+        facts: dict[str, Any],
+    ) -> float:
+        semantic_terms = set(str(term) for term in (query_intent.get("semantic_terms") or []) if str(term).strip())
+        query_years = set(str(year) for year in (query_intent.get("query_years") or []) if str(year).strip())
+        status_target = str(query_intent.get("status_target") or "").strip().lower()
+        doc_terms = set(facts.get("fact_terms") or set())
+        overlap_score = 0.0
+        if semantic_terms:
+            overlap_score = len(semantic_terms.intersection(doc_terms)) / float(max(1, len(semantic_terms)))
+        top_chunk_score = 0.0
+        for chunk in sorted(
+            doc_chunks,
+            key=lambda item: float(item.get("rerank_score", item.get("score", 0.0)) or 0.0),
+            reverse=True,
+        )[:4]:
+            chunk_score = max(
+                self._chunk_query_overlap(question, str(chunk.get("content") or "")),
+                float(chunk.get("rerank_score", chunk.get("score", 0.0)) or 0.0),
+            )
+            if chunk_score > top_chunk_score:
+                top_chunk_score = chunk_score
+        score = (0.58 * overlap_score) + (0.42 * top_chunk_score)
+        if query_years:
+            text_years = set(str(year) for year in (facts.get("text_years") or []))
+            metadata_years = set(str(year) for year in (facts.get("metadata_years") or []))
+            if text_years and query_years.intersection(text_years):
+                score += 0.24
+            elif text_years and not query_years.intersection(text_years):
+                score -= 0.35
+            elif query_years.intersection(metadata_years):
+                score += 0.08
+            else:
+                score -= 0.25
+        if status_target:
+            status = str(facts.get("status") or "").strip().lower()
+            if status == status_target:
+                score += 0.22
+            elif status and status != "unknown":
+                score -= 0.18
+        if "party_entities" in set(query_intent.get("semantic_targets") or []) and (facts.get("parties") or []):
+            score += 0.16
+        return float(score)
+
+    def _match_documents_from_hybrid_evidence(
+        self,
+        question: str,
+        *,
+        candidate_docs: list[dict[str, Any]],
+        chunks: list[dict],
+        query_intent: dict[str, Any],
+    ) -> tuple[list[dict], list[dict], dict[str, dict[str, Any]]]:
+        by_doc: dict[str, list[dict]] = defaultdict(list)
+        for chunk in chunks:
+            doc_id = str(chunk.get("doc_id") or "").strip()
+            if doc_id:
+                by_doc[doc_id].append(chunk)
+        scored: list[tuple[float, dict, dict[str, Any], list[dict]]] = []
+        facts_by_doc: dict[str, dict[str, Any]] = {}
+        semantic_classes = set(str(value) for value in (query_intent.get("semantic_classes") or []))
+        status_target = str(query_intent.get("status_target") or "").strip().lower()
+        query_years = {str(year) for year in (query_intent.get("query_years") or []) if str(year).strip()}
+        for doc in candidate_docs:
+            doc_id = str(doc.get("id") or "").strip()
+            doc_chunks = by_doc.get(doc_id, [])
+            if not doc_chunks:
+                continue
+            facts = self._extract_semantic_facts_for_doc(doc, doc_chunks)
+            facts_by_doc[doc_id] = facts
+            if status_target:
+                status = str(facts.get("status") or "").strip().lower()
+                if status and status != "unknown" and status != status_target:
+                    continue
+            if query_years:
+                text_years = {str(year) for year in (facts.get("text_years") or []) if str(year).strip()}
+                if text_years and not query_years.intersection(text_years):
+                    continue
+                doc_years = {str(year) for year in (facts.get("years") or []) if str(year).strip()}
+                if not text_years and doc_years and not query_years.intersection(doc_years):
+                    continue
+            score = self._semantic_doc_match_score(
+                question,
+                query_intent=query_intent,
+                doc_chunks=doc_chunks,
+                facts=facts,
+            )
+            if "party" in semantic_classes and not (facts.get("parties") or []):
+                score -= 0.1
+            scored.append((score, doc, facts, doc_chunks))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        threshold = 0.22 if query_intent.get("semantic_terms") else 0.12
+        matched_docs: list[dict] = []
+        evidence_chunks: list[dict] = []
+        for score, doc, _facts, doc_chunks in scored:
+            if score < threshold and matched_docs:
+                continue
+            if score < 0.0:
+                continue
+            matched_docs.append(doc)
+            top_chunk = sorted(
+                doc_chunks,
+                key=lambda item: float(item.get("rerank_score", item.get("score", 0.0)) or 0.0),
+                reverse=True,
+            )[:2]
+            evidence_chunks.extend(top_chunk)
+            if len(matched_docs) >= 8:
+                break
+        if not matched_docs and scored:
+            score, doc, _facts, doc_chunks = scored[0]
+            if score >= 0.0:
+                matched_docs = [doc]
+                evidence_chunks = sorted(
+                    doc_chunks,
+                    key=lambda item: float(item.get("rerank_score", item.get("score", 0.0)) or 0.0),
+                    reverse=True,
+                )[:2]
+        merged_chunks = self._merge_chunks(evidence_chunks, limit=max(6, len(evidence_chunks)))
+        return matched_docs, merged_chunks, facts_by_doc
+
+    def _build_hybrid_metadata_answer(
+        self,
+        *,
+        matched_docs: list[dict],
+        facts_by_doc: dict[str, dict[str, Any]],
+        query_intent: dict[str, Any],
+        evidence_score: float,
+        did_retry: bool,
+        scope_relaxed: bool,
+    ) -> str:
+        operation = str(query_intent.get("operation") or "list").strip().lower()
+        count = len(matched_docs)
+        header = (
+            f"There are {count} document(s) matching metadata scope and semantic evidence."
+            if operation == "count"
+            else f"I found {count} document(s) matching metadata scope and semantic evidence."
+        )
+        lines = [header]
+        for doc in matched_docs[:8]:
+            doc_id = str(doc.get("id") or "").strip()
+            filename = str(doc.get("filename") or doc_id or "unknown")
+            facts = facts_by_doc.get(doc_id, {})
+            parts: list[str] = []
+            status = str(facts.get("status") or "").strip().lower()
+            if status and status != "unknown":
+                parts.append(f"status={status}")
+            years = [str(value) for value in (facts.get("years") or [])][:3]
+            if years:
+                parts.append(f"years={', '.join(years)}")
+            parties = [str(value) for value in (facts.get("parties") or [])][:2]
+            if parties:
+                parts.append(f"parties={', '.join(parties)}")
+            detail = "; ".join(parts) if parts else "semantic evidence available in cited excerpts"
+            lines.append(f"- {filename}: {detail}.")
+        lines.append(f"Evidence score: {evidence_score:.2f}.")
+        if did_retry:
+            lines.append("A single bounded semantic retry was used to improve evidence coverage.")
+        if scope_relaxed:
+            lines.append("Metadata scope was relaxed because strict candidates were empty.")
+        return "\n".join(lines)
+
     def _filter_documents_by_metadata(
         self,
         docs: list[dict],
@@ -1164,75 +3365,17 @@ class ChatService:
         operation: str,
         filters: dict[str, Any],
     ) -> list[dict]:
-        now = datetime.now(timezone.utc)
-        filtered: list[dict] = []
-        date_from = self._parse_datetime(filters.get("date_from"))
-        date_to = self._parse_datetime(filters.get("date_to"))
-        if operation == "created_before" and date_to is None and date_from is not None:
-            date_to = date_from
-            date_from = None
-        relative_days = filters.get("relative_days")
-        try:
-            relative_days_int = int(relative_days) if relative_days is not None else None
-        except Exception:
-            relative_days_int = None
-        cutoff_dt = now - timedelta(days=max(0, relative_days_int or 0)) if relative_days_int is not None else None
-
-        author_filter = str(filters.get("author") or "").strip().lower()
-        editor_filter = str(filters.get("last_modified_by") or "").strip().lower()
-        uploader_role_filter = str(filters.get("uploader_role") or "").strip().lower()
-        collaborator_filter = str(filters.get("collaborator_type") or "").strip().lower()
-        doc_type_filter = str(filters.get("doc_type") or "").strip().lower()
-        target_document_filter = str(filters.get("target_document") or "").strip().lower()
-
-        date_baseline = "created" if operation in {"created_after", "created_before", "created_between"} else "updated"
-        if operation in {"list", "count"} and (date_from is not None or date_to is not None):
-            date_baseline = "created"
-
-        for doc in docs:
-            metadata = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
-            created_at = self._doc_created_at(doc)
-            updated_at = self._doc_updated_at(doc)
-            if doc_type_filter and not self._doc_matches_doc_type_filter(doc, doc_type_filter):
-                continue
-            if author_filter:
-                author = str(metadata.get("author") or "").strip().lower()
-                if author_filter not in author:
-                    continue
-            if editor_filter:
-                editor = str(metadata.get("last_modified_by") or "").strip().lower()
-                if editor_filter not in editor:
-                    continue
-            if uploader_role_filter:
-                role = str(metadata.get("uploaded_by_role") or "").strip().lower()
-                if uploader_role_filter not in role:
-                    continue
-            if collaborator_filter:
-                collaborator_type = str(metadata.get("collaborator_type") or "").strip().lower()
-                if collaborator_filter in {"internal", "external", "unknown"}:
-                    if collaborator_filter != collaborator_type:
-                        continue
-                elif collaborator_filter not in collaborator_type:
-                    continue
-            if target_document_filter and not self._doc_matches_target_document(doc, target_document_filter):
-                continue
-            if date_from is not None:
-                baseline = created_at if date_baseline == "created" else updated_at
-                if baseline is None or baseline < date_from:
-                    continue
-            if date_to is not None:
-                baseline = created_at if date_baseline == "created" else updated_at
-                if baseline is None or baseline > date_to:
-                    continue
-            if cutoff_dt is not None:
-                if operation in {"modified_within_days", "edited_by", "last_modified_by"}:
-                    if updated_at is None or updated_at < cutoff_dt:
-                        continue
-                elif operation in {"created_after", "created_before", "created_between", "list", "count"}:
-                    if created_at is None or created_at < cutoff_dt:
-                        continue
-            filtered.append(doc)
-        return filtered
+        return self.metadata_semantic_adapter.filter_documents(
+            docs,
+            operation=operation,
+            filters=filters,
+            parse_datetime=self._parse_datetime,
+            doc_created_at=self._doc_created_at,
+            doc_updated_at=self._doc_updated_at,
+            doc_matches_doc_type_filter=self._doc_matches_doc_type_filter,
+            doc_matches_target_document=self._doc_matches_target_document,
+            now=datetime.now(timezone.utc),
+        )
 
     def _semantic_fallback_for_empty_metadata_result(
         self,
@@ -1274,7 +3417,7 @@ class ChatService:
             intent="qa",
             include_document_summaries=False,
         )
-        if "partial evidence" not in answer.lower():
+        if not self._has_weak_evidence_prefix(answer):
             answer = (
                 "I could not satisfy the strict metadata filters, but I found evidence in document content:\n"
                 + answer
@@ -1796,9 +3939,11 @@ class ChatService:
         question: str,
         doc_ids: Optional[List[str]],
         require_multi_doc: bool,
+        prefer_recall: bool = False,
     ) -> Optional[dict[str, Any]]:
         available_doc_ids = self._selected_or_ready_doc_ids(doc_ids)
-        if len(available_doc_ids) <= 4:
+        doc_type_candidates = extract_query_doc_type_candidates(question)
+        if len(available_doc_ids) <= 4 and not doc_type_candidates:
             return None
 
         entities = self._extract_query_entities(question)
@@ -1807,6 +3952,18 @@ class ChatService:
             return None
 
         doc_records = {str(doc.get("id") or "").strip(): doc for doc in storage.list_documents()}
+        doc_type_scoped = False
+        if doc_type_candidates:
+            typed_doc_ids: list[str] = []
+            for doc_id in available_doc_ids:
+                doc_record = doc_records.get(doc_id) or {"id": doc_id, "filename": ""}
+                if any(self._doc_matches_doc_type_filter(doc_record, candidate) for candidate in doc_type_candidates):
+                    typed_doc_ids.append(doc_id)
+            min_type_docs = 2 if require_multi_doc else 1
+            if len(typed_doc_ids) >= min_type_docs and len(typed_doc_ids) < len(available_doc_ids):
+                available_doc_ids = typed_doc_ids
+                doc_type_scoped = True
+
         doc_text_by_id: dict[str, str] = {}
         doc_tags_by_id: dict[str, list[str]] = {}
         filename_terms_by_id: dict[str, set[str]] = {}
@@ -1997,7 +4154,22 @@ class ChatService:
         if len(scoped_doc_ids) < min_docs:
             scoped_doc_ids = ranked_doc_ids[: max(min_docs, min(max_docs, 4))]
 
-        if not bool(tag_signal.get("high_confidence")) and not filename_anchor_confident and len(scoped_doc_ids) >= len(available_doc_ids):
+        if prefer_recall and len(scoped_doc_ids) < len(ranked_doc_ids):
+            recall_cap = min(
+                len(ranked_doc_ids),
+                max(
+                    len(scoped_doc_ids),
+                    max(10 if require_multi_doc else 8, len(entities) + 4),
+                ),
+            )
+            scoped_doc_ids = ranked_doc_ids[:recall_cap]
+
+        if (
+            not bool(tag_signal.get("high_confidence"))
+            and not filename_anchor_confident
+            and len(scoped_doc_ids) >= len(available_doc_ids)
+            and not doc_type_scoped
+        ):
             return None
 
         confident = bool(
@@ -2010,6 +4182,8 @@ class ChatService:
             "top_tags": expansion_terms,
             "tag_confident": bool(tag_signal.get("high_confidence")),
             "confident": confident,
+            "doc_type_candidates": doc_type_candidates,
+            "doc_type_scoped": doc_type_scoped,
         }
 
     def _build_analysis_plan(
@@ -2554,6 +4728,10 @@ class ChatService:
         )
         return any(marker in text for marker in markers)
 
+    def _has_weak_evidence_prefix(self, answer: str) -> bool:
+        text = str(answer or "").strip()
+        return text.startswith(WEAK_EVIDENCE_PREFIX)
+
     def _fallback_answer(
         self,
         question: str,
@@ -2640,10 +4818,7 @@ class ChatService:
         if not excerpts:
             return "I cannot find the answer in the provided documents."
 
-        return (
-            f"I found partial evidence for '{question}'. The answer may be incomplete:\n"
-            + "\n".join(excerpts)
-        )
+        return WEAK_EVIDENCE_PREFIX + "\n" + "\n".join(excerpts)
 
     def _fallback_compare_answer(
         self,
@@ -2746,6 +4921,39 @@ class ChatService:
         if any(marker in text for marker in broad_list_markers) and any(entity in text for entity in list_entities):
             return True
         return False
+
+    def _is_exhaustive_list_query(
+        self,
+        question: str,
+        *,
+        route: dict[str, Any],
+        intent: str,
+        needs_cross_doc: bool,
+    ) -> bool:
+        if intent != "qa" or not needs_cross_doc:
+            return False
+        expected_answer_type = self._route_expected_answer_type(route)
+        text = str(question or "").strip().lower()
+        if not text:
+            return False
+
+        list_markers = (
+            "list",
+            "which",
+            "what are",
+            "show me",
+            "give me all",
+            "who are",
+            "name all",
+        )
+        explicit_exhaustive_markers = ("all", "each", "every")
+        has_list_marker = any(marker in text for marker in list_markers)
+        has_exhaustive_marker = any(marker in text for marker in explicit_exhaustive_markers)
+        has_plural_signal = bool(re.search(r"\b[a-z0-9]{3,}s\b", text))
+
+        if expected_answer_type == "list" and (has_list_marker or has_exhaustive_marker):
+            return True
+        return has_list_marker and has_exhaustive_marker and has_plural_signal
 
     def _route_question(
         self, question: str, doc_ids: Optional[List[str]], default_top_k: int
@@ -3194,34 +5402,68 @@ class ChatService:
         top_k: int,
         per_doc_limit: int = 4,
         mode: str = "hybrid",
+        prefer_exhaustive: bool = False,
     ) -> List[dict]:
         scoped = self._select_candidate_docs_for_query(
             question,
             doc_ids=doc_ids,
             require_multi_doc=True,
+            prefer_recall=prefer_exhaustive,
         )
         scoped_doc_ids = scoped["doc_ids"] if scoped else doc_ids
-        global_doc_scope = scoped_doc_ids if scoped and bool(scoped.get("confident")) else (doc_ids or [])
+        global_doc_scope = doc_ids
+        primary_top_k = max(10, top_k * (3 if prefer_exhaustive else 2))
+        primary_per_doc = max(3 if prefer_exhaustive else 2, per_doc_limit)
+        primary_use_rerank = not prefer_exhaustive
         primary = self.retrieval.search_balanced(
             question,
-            top_k=max(10, top_k * 2),
+            top_k=primary_top_k,
             doc_ids=scoped_doc_ids,
-            per_doc_limit=max(2, per_doc_limit),
+            per_doc_limit=primary_per_doc,
             mode=mode,
+            use_rerank=primary_use_rerank,
         )
-        merged = self._merge_chunks(primary, limit=max(12, top_k * 3))
+        merged = self._merge_chunks(primary, limit=max(16 if prefer_exhaustive else 12, top_k * (4 if prefer_exhaustive else 3)))
         if scoped and (
             not bool(scoped.get("confident"))
             or self._retrieval_confidence_low(question, merged, min_docs=2)
         ):
             global_primary = self.retrieval.search_balanced(
                 question,
-                top_k=max(10, top_k * 2),
+                top_k=primary_top_k,
                 doc_ids=global_doc_scope or doc_ids,
-                per_doc_limit=max(2, per_doc_limit),
+                per_doc_limit=primary_per_doc,
                 mode=mode,
+                use_rerank=primary_use_rerank,
             )
-            merged = self._merge_chunks(merged + global_primary, limit=max(14, top_k * 3))
+            merged = self._merge_chunks(
+                merged + global_primary,
+                limit=max(18 if prefer_exhaustive else 14, top_k * (4 if prefer_exhaustive else 3)),
+            )
+
+        if prefer_exhaustive:
+            scoped_pool = scoped_doc_ids or global_doc_scope or doc_ids or [
+                doc["id"] for doc in storage.list_documents() if str(doc.get("status", "")).lower() == "ready"
+            ]
+            covered_ids = {str(chunk.get("doc_id") or "").strip() for chunk in merged if str(chunk.get("doc_id") or "").strip()}
+            missing_ids = [candidate for candidate in scoped_pool if str(candidate or "").strip() and str(candidate or "").strip() not in covered_ids]
+            if missing_ids:
+                forced_coverage: List[dict] = []
+                for candidate_doc_id in missing_ids[: max(8, top_k * 2)]:
+                    forced_coverage.extend(
+                        self.retrieval.search(
+                            question,
+                            top_k=3,
+                            doc_ids=[candidate_doc_id],
+                            mode=mode,
+                            use_rerank=False,
+                        )
+                    )
+                merged = self._merge_chunks(
+                    merged + forced_coverage,
+                    limit=max(20, top_k * 5),
+                )
+
         if len({chunk.get("doc_id") for chunk in merged if chunk.get("doc_id")}) >= 2:
             return merged
 
@@ -3230,9 +5472,20 @@ class ChatService:
             doc["id"] for doc in storage.list_documents() if str(doc.get("status", "")).lower() == "ready"
         ]
         forced: List[dict] = []
-        for doc_id in candidate_doc_ids[:6]:
-            forced.extend(self.retrieval.search(question, top_k=2, doc_ids=[doc_id], mode=mode))
-        return self._merge_chunks(merged + forced, limit=max(14, top_k * 3))
+        forced_doc_cap = 10 if prefer_exhaustive else 6
+        forced_top_k = 3 if prefer_exhaustive else 2
+        forced_use_rerank = not prefer_exhaustive
+        for doc_id in candidate_doc_ids[:forced_doc_cap]:
+            forced.extend(
+                self.retrieval.search(
+                    question,
+                    top_k=forced_top_k,
+                    doc_ids=[doc_id],
+                    mode=mode,
+                    use_rerank=forced_use_rerank,
+                )
+            )
+        return self._merge_chunks(merged + forced, limit=max(20 if prefer_exhaustive else 14, top_k * (5 if prefer_exhaustive else 3)))
 
     def _merge_chunks(self, chunks: List[dict], limit: int) -> List[dict]:
         def effective_score(chunk: dict) -> float:

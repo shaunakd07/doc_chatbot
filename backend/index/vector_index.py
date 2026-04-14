@@ -54,6 +54,14 @@ class VectorIndex:
         if self.embeddings.size == 0:
             return []
         query = query_vector.astype("float32")
+        if self.embeddings.ndim != 2 or query.ndim != 1:
+            raise ValueError("Invalid embedding tensor shape for dense search.")
+        if self.embeddings.shape[1] != query.shape[0]:
+            raise ValueError(
+                "Embedding dimension mismatch between index and query "
+                f"(index_dim={self.embeddings.shape[1]}, query_dim={query.shape[0]}). "
+                "Rebuild embeddings or align the configured embedding model."
+            )
         scores = self.embeddings @ query
         top_k = min(top_k, scores.shape[0])
         indices = np.argpartition(-scores, top_k - 1)[:top_k]

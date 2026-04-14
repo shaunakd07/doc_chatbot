@@ -50,6 +50,7 @@ ALLOWED_EXPECTED_ANSWER_TYPES = {
     "boolean",
     "unknown",
 }
+ALLOWED_FACT_TYPES = {"date", "amount", "party"}
 
 
 class RouterService:
@@ -115,6 +116,8 @@ class RouterService:
             "retrieval_plan must contain strategy (semantic|balanced|image_first), top_k, per_doc_limit. "
             "Set task_type=count or metadata_query for metadata-driven questions (counts, latest/earliest upload, date filters, "
             "authors/editors, collaborator role, versions/changes). "
+            "If the user asks to summarize, explain, or say what one named document/agreement/NDA says and is not asking for "
+            "differences between documents, set task_type=qa and needs_cross_doc=false. "
             "Set task_type=compare ONLY when the user explicitly asks to compare or asks for differences, changes, "
             "before/after, or timeline evolution. For multi-document synthesis or aggregation questions that do not "
             "ask for differences, set task_type=qa and needs_cross_doc=true. "
@@ -122,6 +125,13 @@ class RouterService:
             "For trend_analysis set needs_cross_doc=true and needs_numeric_extraction=true. "
             "analysis_plan should include query_entities (list[str]) and evidence_classes (list[str]) inferred "
             "from the query content, not hardcoded labels. "
+            "When the user explicitly names documents, analysis_plan may include target_documents (list[str]). "
+            "When the question asks for exact factual fields such as dates, amounts, values, parties, counterparties, "
+            "or 'which document contains X', analysis_plan may include exact_lookup_requested (bool) and fact_types "
+            "(subset of date|amount|party). "
+            "For compare questions that also ask for exact facts across two or more named documents, set task_type=compare, "
+            "needs_cross_doc=true, analysis_plan.exact_lookup_requested=true, include fact_types, and include "
+            "target_documents when identifiable. "
             "expected_answer_type must be one of count, person, document, list, comparison, timeline, boolean, unknown. "
             "For count/metadata_query, analysis_plan should include metadata_operation and metadata_filters. "
             "metadata_operation must be one of count, latest_uploaded, earliest_uploaded, created_after, created_before, "
@@ -241,6 +251,25 @@ class RouterService:
                 analysis_plan["query_entities"] = entities
             if evidence_classes:
                 analysis_plan["evidence_classes"] = evidence_classes
+            analysis_plan["exact_lookup_requested"] = bool(raw_plan.get("exact_lookup_requested", False))
+            raw_fact_types = raw_plan.get("fact_types")
+            fact_types: List[str] = []
+            if isinstance(raw_fact_types, list):
+                for value in raw_fact_types[:4]:
+                    fact_type = str(value or "").strip().lower()
+                    if fact_type in ALLOWED_FACT_TYPES and fact_type not in fact_types:
+                        fact_types.append(fact_type)
+            if fact_types:
+                analysis_plan["fact_types"] = fact_types
+            raw_target_documents = raw_plan.get("target_documents")
+            target_documents: List[str] = []
+            if isinstance(raw_target_documents, list):
+                for value in raw_target_documents[:6]:
+                    target = str(value or "").strip()
+                    if target and target not in target_documents:
+                        target_documents.append(target)
+            if target_documents:
+                analysis_plan["target_documents"] = target_documents
             metadata_operation = str(raw_plan.get("metadata_operation", "")).strip().lower()
             if metadata_operation in ALLOWED_METADATA_OPERATIONS:
                 analysis_plan["metadata_operation"] = metadata_operation

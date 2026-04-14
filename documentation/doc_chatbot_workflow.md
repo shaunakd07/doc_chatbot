@@ -1,444 +1,414 @@
 # doc_chatbot Workflow and Architecture Guide
 
-This guide explains how `doc_chatbot` works end-to-end in plain technical language. It is based on the current code in this repository.
+This guide describes the current implementation in this repository.
 
-## 1) What this app is
+## 1. What the app is
 
-`doc_chatbot` is a Retrieval-Augmented Generation (RAG) system for your uploaded files.
+`doc_chatbot` is a document ingestion and retrieval application with source-grounded chat on top of uploaded files.
 
-High level flow:
+High-level flow:
 
-1. You upload documents in the UI.
-2. The backend extracts text, tables, images, and diagram structure.
-3. The backend chunks and indexes the extracted content.
-4. When you ask a question, the backend retrieves the most relevant chunks.
-5. The model answers using only that retrieved context.
-6. The UI shows the answer plus sources.
+1. A file upload or Drive import creates a document record.
+2. The ingestion queue extracts text, tables, images, OCR output, and optional graph structure.
+3. The pipeline chunks the extracted content and stores embeddings and metadata.
+4. A chat request is routed, retrieved against the selected documents, and answered from the retrieved evidence.
+5. The API returns an answer plus sources and route metadata.
 
-Important: retrieval happens before generation. The model does not search your files by itself.
+The backend is the system of record. The frontend is a thin client that calls the API and renders results.
 
-## 2) Main components
+## 2. Main runtime components
 
-- API server: FastAPI (`backend/app.py`)
+- API app: `backend/app.py`
+- Config and env parsing: `backend/config.py`
+- Persistence layer: `backend/storage.py`
+- Ingestion queue: `backend/services/ingestion_queue.py`
 - Ingestion pipeline: `backend/ingestion/pipeline.py`
-- Extractors per file type: `backend/ingestion/extractors.py`
-- OCR subsystem: `backend/ingestion/ocr.py` + `backend/ingestion/ocr_worker.py`
-- Diagram parsing: `backend/ingestion/diagram_parser.py`
-- Storage: SQLite wrapper (`backend/storage.py`)
-- Dense vector search: `backend/index/vector_index.py`
-- Sparse lexical search (BM25): `backend/index/sparse_index.py`
+- File extractors: `backend/ingestion/extractors.py`
+- OCR controller and worker: `backend/ingestion/ocr.py`, `backend/ingestion/ocr_worker.py`
+- Diagram parser: `backend/ingestion/diagram_parser.py`
+- Dense index and sparse index: `backend/index/vector_index.py`, `backend/index/sparse_index.py`
 - Retrieval orchestration: `backend/services/retrieval_service.py`
+- Optional Haystack search backend: `backend/services/haystack_backend.py`
 - Chat orchestration: `backend/services/chat_service.py`
-- Prompt templates: `backend/models/prompts.py`
-- Model client (OpenAI): `backend/models/openai_chat.py`
-- Frontend: `frontend/index.html`, `frontend/app.js`
+- OpenAI router: `backend/services/openai_router_service.py`
+- Document classification and review: `backend/services/document_classifier.py`, `backend/services/out_of_place_detection.py`, `backend/services/review_workflow_service.py`
+- Frontend: `frontend/index.html`, `frontend/app.js`, `frontend/styles.css`
 
-## 3) Data directories and persistence
+## 3. Storage and persisted state
 
-Configured in `backend/config.py`:
+Configured directories from `backend/config.py`:
 
-- `data/uploads`: raw uploaded files, stored per document id
-- `data/processed`: processed artifacts (for example saved page/slide images)
-- `data/db/app.db`: SQLite database (legacy/local fallback)
-- `data/index`: reserved index directory (current core index state is rebuilt from DB at startup)
+- `data/uploads/`: raw source files stored under a per-document folder
+- `data/processed/`: derived artifacts such as page images and extracted images
+- `data/db/`: local SQLite path when SQLite is used
+- `data/index/`: local index directory
 
-Database backend is selected by env:
+Database backend:
 
-- `DB_BACKEND=postgres` (recommended for concurrent ingestion)
-- `DB_BACKEND=sqlite` (legacy/single-writer fallback)
+- `DB_BACKEND=postgres` is the current recommended mode and the default in `.env.example`
+- `DB_BACKEND=sqlite` remains supported for simpler local usage
 
-### Tables used
+`backend/storage.py` currently manages these tables:
 
-`backend/storage.py` creates and uses these tables in both SQLite and Postgres:
+- `documents`
+- `chunks`
+- `embeddings`
+- `diagram_graphs`
+- `chat_sessions`
+- `chat_messages`
 
-- `documents`: document metadata and ingestion status
-- `chunks`: chunked retrieval units (text and derived chunk types)
-- `embeddings`: one dense vector per chunk (stored as float32 BLOB)
-- `diagram_graphs`: structured graph JSON extracted from diagrams
+Important detail:
 
-## 4) Upload and ingestion lifecycle
+- In PostgreSQL mode, embeddings are stored in `pgvector`
+- In SQLite mode, embeddings are stored as float32 blobs and dense search is handled in process
 
-### Upload
+## 4. API surface
 
-- Endpoint: `POST /api/documents`
-- A `doc_id` is created immediately.
-- File is saved under `data/uploads/<doc_id>/...`.
-- Ingestion runs as a background task.
+Primary endpoints in `backend/app.py`:
 
-### Document states and progress
+- `GET /api/health`
+- `GET /api/documents`
+- `GET /api/documents/{doc_id}`
+- `GET /api/documents/{doc_id}/diagram-graphs`
+- `POST /api/documents`
+- `POST /api/documents/drive`
+- `DELETE /api/documents/{doc_id}`
+- `DELETE /api/documents`
+- `POST /api/chat`
+- `GET /api/folders/{folder_id}/review-flags`
+- `GET /api/folders/{folder_id}/review-summary`
+- `POST /api/folders/{folder_id}/review-decisions`
+- `GET /api/folders/{folder_id}/out-of-place`
 
-Document status transitions are managed in `backend/ingestion/pipeline.py`:
+The frontend calls these endpoints directly and does not maintain its own persistent state.
 
-- `queued` -> `processing` -> `ready`
-- `failed` if pipeline errors
+## 5. Upload and ingestion lifecycle
 
-Progress metadata is written during ingestion:
+### 5.1 Document creation
 
-- `ingest_progress` (0-100)
+`POST /api/documents`:
+
+1. Creates a `doc_id`
+2. Inserts a `documents` row with `status=queued`
+3. Saves the file under `data/uploads/<doc_id>/...`
+4. Submits ingestion to `IngestionQueue`
+
+`POST /api/documents/drive`:
+
+1. Downloads a file or folder through `gdown`
+2. Creates one document record per discovered file
+3. Copies each file into the upload area
+4. Queues each file for ingestion
+
+### 5.2 Status transitions
+
+The normal state flow is:
+
+- `queued`
+- `processing`
+- `ready`
+
+On pipeline failure the document is marked:
+
+- `failed`
+
+The ingestion pipeline writes progress metadata such as:
+
+- `ingest_progress`
 - `ingest_stage`
 - `ingest_message`
 - `ingest_updated_at`
+- `ingest_error`
 
-The frontend polls `/api/documents` and renders progress bars under each doc.
+The frontend polls `GET /api/documents` and uses this metadata to render progress.
 
-## 5) How each file type is handled
+## 6. Ingestion pipeline details
 
-All file extraction starts in `ingest_file()` and dispatches to extractors by extension.
+The main entrypoint is `ingest_file()` in `backend/ingestion/pipeline.py`.
 
-### PDF (`.pdf`)
+### 6.1 Extraction dispatch
 
-Handled by `extract_pdf()`:
+Current extractor dispatch is extension-based with a best-effort generic fallback.
 
-- Native text is extracted with PyMuPDF (`fitz`), page by page.
-- Each page is also rendered to an image (`PDF_RENDER_DPI`).
-- OCR fallback flag is set if native text is too small (`OCR_NATIVE_TEXT_MIN_CHARS`).
+Supported categories include:
 
-Result: PDFs can contribute both native text chunks and image-derived OCR/diagram chunks.
+- PDF
+- PPTX
+- DOCX
+- XLSX, XLSM, XLTX, XLTM, XLS
+- text-like formats such as TXT, MD, CSV, JSON, YAML, LOG, INI, CFG, TOML
+- HTML, XML, RTF
+- ODT, ODS, ODP
+- image formats such as PNG, JPG, TIFF, BMP, GIF, WEBP
 
-### PPTX (`.pptx`)
+Fallback behavior in `extract_generic()`:
 
-Handled by `extract_pptx()`:
+1. Try format-specific helpers for HTML, XML, RTF, spreadsheet, and ODF files
+2. Detect OOXML/ODF payloads inside zip containers
+3. Attempt PDF extraction
+4. Fall back to plain text read
 
-- Reads slide shapes with `python-pptx`.
-- Extracts text from text boxes.
-- Extracts tables.
-- Extracts embedded images.
-- Builds slide-level graph structure from reading order and connectors.
-- Builds document-level slide relationship graph.
-- Optionally renders full slides via LibreOffice (`soffice`) to PDF->images when enabled.
+### 6.2 OCR behavior
 
-Result: PPTX contributes text/table/image plus `slide_graph` graph chunks and optionally full-slide OCR/diagram evidence.
+OCR is mediated by `backend/ingestion/ocr.py` and executed in the worker subprocess in `backend/ingestion/ocr_worker.py`.
 
-### DOCX (`.docx`)
+Why the worker exists:
 
-Handled by `extract_docx()`:
+- isolate OCR runtime dependencies
+- reduce conflicts with the rest of the Python process
+- allow timeout/retry handling per OCR request
 
-- Primary path: `python-docx`.
-- Fallback path: direct OOXML parsing from zip/XML.
-- Extracts paragraphs, tables, and embedded images.
+Current OCR options:
 
-### Spreadsheets (`.xlsx`, `.xlsm`, `.xltx`, `.xltm`, `.xls`)
+- `OCR_ENGINE=tesseract` by default
+- optional `OCR_ENGINE=paddle`
 
-- `.xlsx` family: `openpyxl`
-- `.xls`: `xlrd`
-- Rows are converted into table text blocks.
-- Embedded images in `.xlsx` are also extracted when available.
-
-### Images (`.png`, `.jpg`, `.jpeg`, `.tiff`, `.bmp`, `.gif`, `.webp`)
-
-- Loaded as image blocks.
-- OCR and diagram parsing run in the ingestion pipeline.
-
-### Text-like files (`.txt`, `.md`, `.csv`, `.tsv`, `.json`, `.yaml`, `.yml`, `.log`, `.ini`, `.cfg`, `.toml`)
-
-- Read directly as text.
-
-### Generic fallback
-
-`extract_generic()` tries:
-
-- HTML/XML stripping
-- RTF conversion
-- ODF parsing
-- Zip-based Office format detection
-- PDF parse attempt
-- Plain text read as last resort
-
-## 6) OCR handling (including GPU/CPU behavior)
-
-OCR is handled in two layers:
-
-- Parent OCR controller: `backend/ingestion/ocr.py`
-- OCR worker subprocess: `backend/ingestion/ocr_worker.py`
-
-### Why a separate worker process
-
-The OCR worker isolates OCR runtime from the main API process. This avoids DLL/CUDA conflicts with other libraries.
-
-### OCR flow
-
-1. Ingestion sends an image to OCR controller.
-2. Controller encodes image to base64 and sends JSON request to worker over stdin.
-3. Worker runs the configured OCR engine (default: Tesseract) and returns text/confidence JSON over stdout.
-4. Controller merges OCR text into chunk content if available.
-
-### OCR controls
-
-Environment variables include:
-
-- `ENABLE_OCR`
-- `OCR_ENGINE` (`tesseract` or `paddle`)
-- `PADDLE_OCR_USE_GPU`
-- `PADDLE_OCR_LANG`
-- `PADDLE_OCR_MIN_CONFIDENCE`
-- `PADDLE_OCR_MAX_RETRIES`
-- `OCR_WORKER_TIMEOUT_SEC`
-- `OCR_WORKER_STARTUP_TIMEOUT_SEC`
-
-### OCR output fields tracked per image block
+Common OCR metadata written on image-derived content includes:
 
 - `ocr_status`
 - `ocr_engine`
 - `ocr_confidence`
 - `ocr_line_count`
-- `ocr_error` (if any)
+- `ocr_error`
 
-## 7) Diagram and graph handling
+### 6.3 Diagram and graph extraction
 
-`parse_image_diagram()` in `backend/ingestion/diagram_parser.py` performs structure extraction from images.
+When image-like content appears diagram-like, `parse_image_diagram()` can extract:
 
-### Node detection
+- graph summary chunks
+- node chunks
+- edge chunks
+- persisted graph JSON records in `diagram_graphs`
 
-Two strategies:
+Detection and graph-building use a mix of:
 
-- YOLO detector (`ultralytics`) when enabled and available
-- OpenCV contour-based fallback
+- Ultralytics YOLO when enabled
+- OpenCV contour and edge logic as fallback
+- OCR over node crops
+- NetworkX metrics when available
 
-### Text in nodes
+### 6.4 Chunking and embedding
 
-For each detected node region, OCR is run on the crop to get labels.
+Chunking is character-window based in `backend/ingestion/text_chunker.py`.
 
-### Edge detection
+The pipeline:
 
-- OpenCV Canny + Hough line detection
-- Lines are attached to nearest nodes
-- Direction hints inferred (left-to-right or top-to-bottom)
+1. Builds content blocks
+2. Splits text into overlapping chunks
+3. Persists chunk rows
+4. Computes embeddings in batch
+5. Persists embeddings
+6. Updates dense and sparse retrieval structures
 
-### Graph metrics
+The pipeline also writes derived metadata such as:
 
-If NetworkX is available:
+- `auto_tags`
+- `doc_type`
+- `doc_type_confidence`
+- `doc_type_scores`
 
-- connected components
-- largest component
-- density
+## 7. File-type behavior summary
 
-### Persisted outputs
+### PDF
 
-- Structured graph JSON into `diagram_graphs` table
-- Retrieval chunks for:
-  - `diagram_graph`
-  - `diagram_node`
-  - `diagram_edge`
+- native text extraction with PyMuPDF
+- page rendering to images
+- OCR and diagram handling where needed
 
-These chunks are later retrievable like normal text chunks.
+### PPTX
 
-## 8) Chunking and tokenization
+- shape text extraction
+- table extraction
+- embedded image extraction
+- slide relationship graph generation
+- optional full-slide rendering through LibreOffice for OCR fallback
 
-There are multiple "tokenization" layers in this app.
+### DOCX
 
-### Layer A: ingestion chunking (character-based)
+- paragraph extraction
+- table extraction
+- embedded image extraction
+- OOXML fallback if `python-docx` is unavailable
 
-`chunk_text()` (`backend/ingestion/text_chunker.py`) splits text by character count with overlap.
+### Spreadsheets
 
-- Default in pipeline: about 900 chars with 120-char overlap
-- It tries to break on spaces near chunk boundaries
+- table-style serialization of rows
+- sheet names preserved in extracted text
+- embedded image extraction for supported workbook formats
 
-This is not model-token based chunking. It is a lightweight character-window chunker.
+### Images
 
-### Layer B: sparse retrieval tokenization
+- stored as image-derived content
+- OCR and diagram parsing run from the ingestion pipeline
 
-`SparseIndex` tokenizes with regex:
+## 8. Retrieval and chat flow
 
-- pattern: `[A-Za-z0-9_]{2,}`
-- lowercased tokens
-- BM25 scoring
+The main answer path is in `ChatService.answer()`.
 
-This tokenization is for lexical retrieval only.
+### 8.1 Conversation memory
 
-### Layer C: model tokenizer (internal)
+If `CHAT_MEMORY_ENABLED=true`, the backend:
 
-When generating embeddings or answers, tokenization is handled by the model provider internally:
+- loads recent chat state from `chat_sessions` and `chat_messages`
+- can rewrite the current user question using recent conversation context
+- persists the new turn after a successful answer
 
-- Embeddings: OpenAI embedding endpoint (or local SentenceTransformer if configured)
-- Chat model: OpenAI chat model tokenizer internally
+### 8.2 Route planning
 
-The app does not manually tokenize into model tokens.
+`OpenAIRouterService` returns a structured route with fields such as:
 
-## 9) How the vector database is built (and what type it is)
-
-### What it is
-
-This project uses a hybrid storage/index design:
-
-- Primary persisted store: PostgreSQL (recommended) or SQLite fallback
-- Dense vectors persisted in `embeddings`:
-  - Postgres mode: `pgvector` column (`vector(PGVECTOR_DIM)`)
-  - SQLite mode: float32 BLOB
-- Dense retrieval:
-  - Postgres mode: SQL vector similarity search with pgvector
-  - SQLite mode: in-memory dense matrix search
-- Sparse BM25 index rebuilt from chunks at startup (`SparseIndex`)
-
-So this is not FAISS or a managed vector DB service. In Postgres mode it uses `pgvector`.
-
-### Build process during ingestion
-
-For each chunk:
-
-1. Chunk is inserted into `chunks` table.
-2. Embedding vector is computed in batch.
-3. Embedding is written to `embeddings` table.
-4. Dense index/search path updates:
-   - Postgres mode: query-time pgvector search (no in-memory preload needed)
-   - SQLite mode: in-memory matrix append
-5. In-memory `SparseIndex` adds BM25 terms.
-
-### Dense similarity math
-
-- Embeddings are normalized.
-- Postgres mode uses pgvector cosine distance (`<=>`) converted to score.
-- SQLite mode uses dot product of normalized vectors.
-
-## 10) Retrieval pipeline for a user question
-
-Main path: `ChatService.answer()` + `RetrievalService`
-
-### Step 1: Route planning
-
-`OpenAIRouterService` classifies question into route info:
-
-- `task_type` (`qa`, `compare`, etc.)
+- `task_type`
 - `needs_cross_doc`
+- `needs_numeric_extraction`
 - `needs_image_reasoning`
-- retrieval plan:
-  - `strategy` (`semantic`, `balanced`, `image_first`)
-  - `top_k`
-  - `per_doc_limit`
+- `retrieval_plan`
+- `analysis_plan`
+- `expected_answer_type`
+- `confidence`
 
-If router fails or confidence is low, heuristic fallback is used.
+The router is OpenAI-backed in the current implementation.
 
-### Step 2: Candidate retrieval
+### 8.3 Retrieval modes
 
-`RetrievalService` supports:
+Current retrieval paths include:
 
-- semantic: dense only
-- sparse: BM25 only
-- hybrid: RRF fusion of dense+sparse
+- dense semantic retrieval
+- sparse BM25 retrieval
+- hybrid reciprocal-rank fusion
+- balanced per-document retrieval for cross-document coverage
 
-For hybrid mode, it oversamples candidates, fuses scores with Reciprocal Rank Fusion, hydrates chunks from SQLite, then optional reranking.
+Optional enrichments:
 
-### Step 3: Optional reranking
+- cross-encoder reranking
+- metadata-semantic adaptation
+- Haystack-backed in-memory retrieval flow when enabled
 
-`Reranker` (cross-encoder) can reorder top chunks.
-If unavailable, a lexical overlap fallback score is used.
+### 8.4 Metadata-aware queries
 
-### Step 4: Diagram-aware evidence mixing
+The chat service now has a dedicated metadata-query path for questions such as:
 
-For diagram/relationship/image intents, `ChatService` enforces mixed evidence and ordering so context includes types like:
+- counts
+- latest or earliest uploads
+- date-filtered document questions
+- author/editor/uploader-role questions
+- version-change comparisons
 
-- `diagram_graph`
-- `ocr`
-- `diagram_node`
-- `slide_graph`
-- `diagram_edge` (lower priority)
+That path is implemented in `backend/services/chat_service.py`; it is not just a prompt trick.
 
-### Step 5: Context assembly
+### 8.5 Context assembly and answer generation
 
-`_build_context_blocks()` builds source-tagged blocks up to `MAX_CONTEXT_CHARS`.
+After retrieval:
 
-Source tags include doc label, doc_id, page, chunk id, and source type.
+1. chunks are deduplicated and ordered
+2. source tags are added
+3. optional document summaries are added
+4. image evidence can be attached for multimodal generation
+5. `OpenAIChatModel` sends the request to the configured chat model
 
-## 11) Prompt handling and generation
+Returned API payloads include:
 
-### Prompt templates
+- `answer`
+- `sources`
+- `intent`
+- `route`
+- `conversation_id`
 
-Prompt text is built in `backend/models/prompts.py`:
+## 9. Folder review and document classification workflow
 
-- `build_prompt()` for standard QA
-- `build_compare_prompt()` for comparison/timeline style tasks
+The backend supports advisory review of folder uploads where an expected document type is known.
 
-Prompt rules enforce:
+Current provider options in `backend/services/document_classifier.py`:
 
-- Use provided context only
-- Include source citations
-- Short paragraph formatting
-- For open-ended questions: provide best evidence-based explanation and clearly state missing details
-- Use refusal sentence only if no relevant evidence exists
+- `heuristic`
+- `semantic_openai`
+- `azure_document_intelligence`
 
-### Important clarification
+Current default from `.env.example`:
 
-The prompt does not make retrieval happen. Retrieval already happened in backend code before prompt creation.
+- `DOC_TYPE_CLASSIFIER_PROVIDER=heuristic`
 
-The prompt controls generation behavior on top of the retrieved context.
+Flow:
 
-### Generation call
+1. upload or Drive import stores `folder_id` and `expected_doc_type`
+2. ingestion completes and writes base document-type metadata
+3. `IngestionQueue` triggers `detectOutOfPlaceDocuments()`
+4. review metadata is written back onto the affected documents
+5. reviewers can query summary state or apply decisions through the folder review endpoints
 
-`OpenAIChatModel.generate_text()` sends:
+Decision types currently supported:
 
-- Prompt text
-- Optional up to 5 context images (base64)
+- `dismiss`
+- `accept`
+- `whitelist`
+- `reopen`
 
-This allows multimodal response generation for visual questions.
+Important current limitation:
 
-## 12) How context scope is controlled
+- the backend supports single-file review metadata through request headers
+- the frontend currently renders review inputs but does not send those headers during upload
+- Drive import is the most complete built-in API path for review metadata today
 
-The frontend lets users select:
+## 10. Current frontend behavior
 
-- all ready docs
-- specific ready docs only
+The browser UI exposes three tabs:
 
-Selected `doc_ids` are sent with chat request.
+- `Chat`
+- `Documents`
+- `Logs`
 
-Backend validates selected docs:
+Current capabilities:
 
-- doc exists
-- doc is `ready`
+- upload files
+- upload folders
+- import from Google Drive
+- poll ingestion progress
+- select ready documents for chat scope
+- delete one or all documents
+- inspect client-side activity logs
 
-Only validated selected docs are considered during retrieval.
+The frontend is intentionally lightweight and most business logic remains in the backend.
 
-## 13) Why answers can still fail even with OCR/graphs
+## 11. Important configuration areas
 
-Common causes:
+High-impact environment variables:
 
-- OCR text quality is noisy for complex diagrams
-- Retrieval may return structural chunks that lack clear explanatory text
-- Context budget may truncate useful lower-ranked chunks
-- Strict source-grounding rules may force conservative answers
-
-## 14) Practical tuning knobs
-
-High-impact variables:
-
-- Retrieval and context:
-  - `TOP_K`
-  - `MAX_CONTEXT_CHARS`
+- OpenAI models:
+  - `OPENAI_CHAT_MODEL`
+  - `OPENAI_EMBED_MODEL`
+  - `OPENAI_ROUTER_MODEL`
+- retrieval:
   - `RETRIEVAL_MODE`
+  - `ENABLE_RERANKER`
   - `RERANK_TOP_N`
+  - `HYBRID_METADATA_SEMANTIC`
+  - `ENABLE_HAYSTACK_RETRIEVAL`
+- chat memory:
+  - `CHAT_MEMORY_ENABLED`
+  - `CHAT_MEMORY_RECENT_TURNS`
+  - `CHAT_MEMORY_MAX_MESSAGES`
 - OCR:
   - `ENABLE_OCR`
   - `OCR_ENGINE`
-  - `PADDLE_OCR_USE_GPU`
-  - `PADDLE_OCR_MIN_CONFIDENCE`
-  - `PDF_RENDER_DPI`
-- Diagram parsing:
+  - `OCR_WORKER_TIMEOUT_SEC`
+- diagrams:
+  - `ENABLE_DIAGRAM_PIPELINE`
   - `ENABLE_YOLO_DIAGRAM_DETECTOR`
-  - `YOLO_CONF_THRESHOLD`
-  - `YOLO_IMAGE_SIZE`
-  - `DIAGRAM_*` thresholds and minimum evidence settings
+  - `YOLO_*`
+  - `DIAGRAM_*`
+- review workflow:
+  - `DOC_TYPE_REVIEW_ENABLED`
+  - `DOC_TYPE_REVIEW_CONFIDENCE_THRESHOLD`
+  - `DOC_TYPE_REVIEW_MIN_SCORE_RATIO`
+  - `DOC_TYPE_CLASSIFIER_PROVIDER`
+- persistence:
+  - `DB_BACKEND`
+  - `DATABASE_URL`
+  - `SQLITE_DB_PATH`
 
-After changing ingestion-related settings, re-ingest documents so new chunks/metadata are built.
+## 12. Known implementation caveats
 
-## 15) End-to-end request sequence (concise)
-
-### Upload path
-
-1. UI calls `POST /api/documents`.
-2. Backend saves file and queues ingestion.
-3. Ingestion extracts blocks, OCR, diagrams, graphs.
-4. Text is chunked and embedded.
-5. Chunks, embeddings, and graph records are stored.
-6. Doc becomes `ready`.
-
-### Chat path
-
-1. UI sends `POST /api/chat` with `message`, selected `doc_ids`, and summary flag.
-2. Router decides intent/retrieval plan.
-3. Retriever fetches and reranks chunks.
-4. Diagram-aware mixing/ordering adjusts context.
-5. Prompt is assembled with source tags.
-6. Model generates answer from context (+ optional images).
-7. Backend returns answer, route, and source list.
-
-## 16) Current architecture summary in one sentence
-
-`doc_chatbot` is a Postgres/SQLite-backed, hybrid-retrieval RAG system with OCR and diagram-graph enrichment that builds evidence chunks at ingestion time, then uses router-guided retrieval plus strict source-grounded prompting at answer time.
+- The health payload still reports some legacy names such as `vlm_enabled`, but the current stack is OpenAI-backed rather than the older local-VLM setup.
+- `data/index/` still exists in config and on disk, but the authoritative persisted state is the database plus processed artifacts.
+- Folder review UI is only partially wired on the frontend.
+- PPTX full-slide rendering depends on LibreOffice being available on the machine.
+- OCR and diagram-heavy ingestion quality remains environment-sensitive and should be validated with the local test corpus after major config changes.

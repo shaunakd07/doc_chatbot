@@ -26,6 +26,7 @@ opencv-python==4.13.0.92
 opencv-contrib-python==4.13.0.92
 networkx==3.6.1
 ultralytics==8.4.18
+haystack-ai==2.24.1
 
 # Optional Paddle OCR stack (not needed for default tesseract setup):
 # paddleocr==3.4.0

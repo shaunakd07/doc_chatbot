@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import logging
 from typing import List, Optional
 
 from .. import storage
+
+logger = logging.getLogger(__name__)
 
 
 class RetrievalService:
@@ -56,17 +59,32 @@ class RetrievalService:
         oversample = max(top_k * 6, 50)
         dense_raw: list[tuple[str, float]] = []
         sparse_raw: list[tuple[str, float]] = []
+        dense_error: Exception | None = None
 
         if effective_mode in {"semantic", "hybrid", "image_first"} and self.embedder is not None:
-            query_vec = self.embedder.embed_query(query)
-            dense_raw = self.vector_index.search(query_vec, top_k=oversample)
+            try:
+                query_vec = self.embedder.embed_query(query)
+                dense_raw = self.vector_index.search(query_vec, top_k=oversample)
+            except Exception as exc:
+                dense_error = exc
+                logger.warning("Dense retrieval failed; continuing with fallback path: %s", exc)
         if effective_mode in {"sparse", "hybrid", "image_first"} and self.sparse_index is not None:
             sparse_raw = self.sparse_index.search(query, top_k=oversample)
 
         if effective_mode == "semantic":
+            if not dense_raw and sparse_raw:
+                return sparse_raw
+            if dense_error is not None and not dense_raw:
+                raise dense_error
             return dense_raw
         if effective_mode == "sparse":
             return sparse_raw
+        if dense_raw and not sparse_raw:
+            return dense_raw
+        if sparse_raw and not dense_raw:
+            return sparse_raw
+        if dense_error is not None and not dense_raw and not sparse_raw:
+            raise dense_error
         return self._rrf_fuse(dense_raw, sparse_raw)
 
     def _hydrate_candidates(

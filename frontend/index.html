@@ -10,29 +10,135 @@
     <div class="bg"></div>
     <main class="shell">
       <header class="hero">
-        <h1>Doc Chatbot</h1>
+        <div class="hero-copy">
+          <h1>Doc Chatbot</h1>
+          <p>Conversational retrieval with workspace tabs for chat, document operations, and logs.</p>
+        </div>
+        <div id="status" class="status-pill" aria-live="polite"></div>
       </header>
 
-      <section class="panel upload">
-        <div class="upload-controls">
-          <input type="file" id="fileInput" multiple />
-          <button id="uploadBtn">Upload Files</button>
-          <input type="file" id="folderInput" webkitdirectory directory multiple style="display: none;" />
-          <button id="uploadFolderBtn">Upload Folder</button>
+      <nav class="tab-bar" role="tablist" aria-label="Workspace tabs">
+        <button
+          id="tabBtnChat"
+          class="tab-btn is-active"
+          type="button"
+          role="tab"
+          aria-selected="true"
+          aria-controls="tabPanelChat"
+          data-tab="chat"
+        >
+          Chat
+        </button>
+        <button
+          id="tabBtnDocuments"
+          class="tab-btn"
+          type="button"
+          role="tab"
+          aria-selected="false"
+          aria-controls="tabPanelDocuments"
+          tabindex="-1"
+          data-tab="documents"
+        >
+          Documents
+        </button>
+        <button
+          id="tabBtnLogs"
+          class="tab-btn"
+          type="button"
+          role="tab"
+          aria-selected="false"
+          aria-controls="tabPanelLogs"
+          tabindex="-1"
+          data-tab="logs"
+        >
+          Logs
+        </button>
+      </nav>
+
+      <section
+        id="tabPanelChat"
+        class="tab-panel is-active"
+        role="tabpanel"
+        aria-labelledby="tabBtnChat"
+        data-tab-panel="chat"
+      >
+        <div class="panel chat chat-pane" id="chatPane">
+          <div class="chat-head">
+            <h2>Ask anything about your documents</h2>
+            <label class="chat-option">
+              <input id="includeDocSummaries" type="checkbox" checked />
+              <span>Include document summaries</span>
+            </label>
+          </div>
+          <div class="chat-input-wrap">
+            <div class="chat-input">
+              <input id="chatInput" type="text" placeholder="Ask about your documents..." />
+              <button id="sendBtn">Send</button>
+            </div>
+          </div>
+          <div id="chatLog" class="chat-log"></div>
         </div>
-        <div class="upload-controls drive-controls">
-          <input type="text" id="driveUrlInput" placeholder="Paste Google Drive Folder URL..." />
-          <button id="driveImportBtn">Import from Drive</button>
-        </div>
-        <span id="uploadMsg" class="upload-msg"></span>
       </section>
 
-      <section class="workspace" id="workspace">
-        <aside class="panel docs-sidebar" id="docsSidebar">
+      <section
+        id="tabPanelDocuments"
+        class="tab-panel"
+        role="tabpanel"
+        aria-labelledby="tabBtnDocuments"
+        data-tab-panel="documents"
+        hidden
+      >
+        <section class="panel upload">
+          <div class="upload-head">
+            <h2>Document Intake</h2>
+            <p>Upload files, import Drive folders, and review out-of-place detection settings.</p>
+          </div>
+          <div class="upload-controls">
+            <input type="file" id="fileInput" multiple />
+            <button id="uploadBtn">Upload Files</button>
+            <input type="file" id="folderInput" webkitdirectory directory multiple style="display: none;" />
+            <button id="uploadFolderBtn">Upload Folder</button>
+          </div>
+          <div class="upload-controls drive-controls">
+            <input type="text" id="driveUrlInput" placeholder="Paste Google Drive Folder URL..." />
+            <button id="driveImportBtn">Import from Drive</button>
+          </div>
+          <div class="upload-controls review-controls">
+            <label class="review-field" for="folderExpectedTypeInput">
+              <span>Folder expected type</span>
+              <input
+                id="folderExpectedTypeInput"
+                type="text"
+                placeholder="Type expected label, e.g. invoice or technical proposal"
+              />
+            </label>
+            <label class="review-field" for="folderReviewThresholdInput">
+              <span>Review threshold</span>
+              <input
+                id="folderReviewThresholdInput"
+                type="number"
+                min="0.01"
+                max="0.99"
+                step="0.01"
+                placeholder="0.90 (optional)"
+              />
+            </label>
+            <label class="review-field review-field-wide" for="folderReviewWhitelistInput">
+              <span>Whitelist predicted types</span>
+              <input
+                id="folderReviewWhitelistInput"
+                type="text"
+                placeholder="Optional comma-separated list, e.g. receipt, technical proposal"
+              />
+            </label>
+          </div>
+          <span id="uploadMsg" class="upload-msg"></span>
+        </section>
+
+        <section class="panel documents-manager" id="documentsManager">
           <div class="docs-header">
             <h3>Documents</h3>
             <div class="docs-header-actions">
-              <button id="collapseSidebarBtn" class="collapse-btn" type="button" aria-expanded="true">Collapse</button>
               <button id="deleteAllBtn" class="delete-all-btn" type="button">Delete All</button>
             </div>
           </div>
@@ -46,29 +152,26 @@
           <div class="doc-list-wrap">
             <ul id="docList" class="doc-list"></ul>
           </div>
-        </aside>
+        </section>
+      </section>
 
-        <div id="sidebarResizer" class="resizer sidebar-resizer" role="separator" aria-orientation="vertical" aria-label="Resize documents sidebar"></div>
-
-        <section class="main-area" id="mainArea">
-          <button id="expandSidebarBtn" class="expand-sidebar-btn" type="button" aria-expanded="false">Show Documents</button>
-          <div class="panel chat chat-pane" id="chatPane">
-            <div class="chat-head">
-              <h2>Ask anything about your documents</h2>
-              <label class="chat-option">
-                <input id="includeDocSummaries" type="checkbox" checked />
-                <span>Include document summaries</span>
-              </label>
+      <section
+        id="tabPanelLogs"
+        class="tab-panel"
+        role="tabpanel"
+        aria-labelledby="tabBtnLogs"
+        data-tab-panel="logs"
+        hidden
+      >
+        <section class="panel logs-panel">
+          <div class="logs-head">
+            <div>
+              <h2>Activity Logs</h2>
+              <p>Detailed client-side events for uploads, chat requests/responses, and document actions.</p>
             </div>
-            <div class="chat-input-wrap">
-              <div class="chat-input">
-                <input id="chatInput" type="text" placeholder="Ask about your documents..." />
-                <button id="sendBtn">Send</button>
-              </div>
-            </div>
-            <div id="chatLog" class="chat-log"></div>
-            <div id="chatResizer" class="resizer chat-resizer" role="separator" aria-orientation="vertical" aria-label="Resize chat panel"></div>
+            <button id="clearLogsBtn" class="clear-logs-btn" type="button">Clear Logs</button>
           </div>
+          <div id="eventLog" class="event-log" role="log" aria-live="polite"></div>
         </section>
       </section>
     </main>

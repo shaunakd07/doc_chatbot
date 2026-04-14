@@ -20,6 +20,7 @@ from .extractors import (
     extract_xlsx,
 )
 from .diagram_parser import parse_image_diagram
+from .document_facts import extract_document_facts
 from .doc_metadata import collect_document_metadata, compute_version_metadata
 from .doc_tags import build_document_auto_tags
 from .doc_types import infer_doc_type
@@ -555,6 +556,9 @@ def ingest_file(
         if chunks:
             _set_progress(84, "processing", f"Embedding {len(chunks)} chunk(s)")
             storage.add_chunks(chunks)
+            document_facts = extract_document_facts(doc_id, chunks)
+            if document_facts:
+                storage.add_document_facts(document_facts)
             texts = [chunk["content"] for chunk in chunks]
             vectors = embedder.embed_texts(texts)
             dim = vectors.shape[1]
@@ -583,6 +587,7 @@ def ingest_file(
             extra_metadata={
                 "ingest_block_count": total_blocks,
                 "ingest_chunk_count": len(chunks),
+                "ingest_fact_count": len(document_facts) if chunks else 0,
                 "auto_tags": auto_tags,
                 "auto_tag_version": "v1",
                 "doc_type": doc_type,

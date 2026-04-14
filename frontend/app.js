@@ -4,196 +4,208 @@ const deleteAllBtn = document.getElementById("deleteAllBtn");
 const uploadBtn = document.getElementById("uploadBtn");
 const uploadMsg = document.getElementById("uploadMsg");
 const fileInput = document.getElementById("fileInput");
+const folderInput = document.getElementById("folderInput");
+const uploadFolderBtn = document.getElementById("uploadFolderBtn");
+const driveUrlInput = document.getElementById("driveUrlInput");
+const driveImportBtn = document.getElementById("driveImportBtn");
 const chatLog = document.getElementById("chatLog");
 const chatInput = document.getElementById("chatInput");
 const sendBtn = document.getElementById("sendBtn");
 const includeDocSummaries = document.getElementById("includeDocSummaries");
 const selectAllDocs = document.getElementById("selectAllDocs");
 const scopeSummary = document.getElementById("scopeSummary");
-const workspace = document.getElementById("workspace");
-const docsSidebar = document.getElementById("docsSidebar");
-const mainArea = document.getElementById("mainArea");
-const chatPane = document.getElementById("chatPane");
-const sidebarResizer = document.getElementById("sidebarResizer");
-const chatResizer = document.getElementById("chatResizer");
-const collapseSidebarBtn = document.getElementById("collapseSidebarBtn");
-const expandSidebarBtn = document.getElementById("expandSidebarBtn");
+const tabButtons = Array.from(document.querySelectorAll(".tab-btn[data-tab]"));
+const tabPanels = Array.from(document.querySelectorAll(".tab-panel[data-tab-panel]"));
+const eventLog = document.getElementById("eventLog");
+const clearLogsBtn = document.getElementById("clearLogsBtn");
 const TRASH_ICON_SRC = "/icons/trash-can-icon-vector-13490171.avif";
+const DEFAULT_TAB = "chat";
+const ACTIVITY_LOG_LIMIT = 400;
+const SUPPRESSED_ACTIVITY_LOG_EVENTS = new Set(["ui.tab.changed"]);
 
 let docsCache = [];
 let selectedDocIds = new Set();
 let scopeMode = "all";
 let docsPollingTimer = null;
+let docsSnapshotSignature = "";
+let activityLogs = [];
+let logSequence = 0;
+let conversationId = null;
 
-const SIDEBAR_MIN = 240;
-const SIDEBAR_MAX = 640;
-const CHAT_MIN = 460;
 const UI_KEYS = {
-  sidebarWidth: "ui.sidebar.width",
-  sidebarCollapsed: "ui.sidebar.collapsed",
-  layoutVersion: "ui.layout.version",
+  activeTab: "ui.active_tab",
 };
-const UI_LAYOUT_VERSION = "2";
 
-function getChatMinWidth(mainWidth) {
-  return Math.max(CHAT_MIN, Math.round(mainWidth * 0.6));
-}
+function setActiveTab(tabName, options = {}) {
+  const { persist = true, focusButton = false, logEvent = true } = options;
+  const nextTab = tabButtons.some((btn) => btn.dataset.tab === tabName) ? tabName : DEFAULT_TAB;
 
-function clamp(value, min, max) {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return min;
-  return Math.min(max, Math.max(min, n));
-}
-
-function getStoredNumber(key) {
-  const value = Number(window.localStorage.getItem(key));
-  return Number.isFinite(value) ? value : null;
-}
-
-function setSidebarCollapsed(collapsed) {
-  if (!workspace) return;
-  workspace.classList.toggle("sidebar-collapsed", !!collapsed);
-  if (collapseSidebarBtn) {
-    collapseSidebarBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
-    collapseSidebarBtn.textContent = collapsed ? "Expand" : "Collapse";
-  }
-  if (expandSidebarBtn) {
-    expandSidebarBtn.setAttribute("aria-expanded", collapsed ? "false" : "true");
-  }
-  window.localStorage.setItem(UI_KEYS.sidebarCollapsed, collapsed ? "1" : "0");
-}
-
-function applyInitialLayoutPrefs() {
-  if (!docsSidebar || !chatPane) return;
-
-  const savedLayoutVersion = window.localStorage.getItem(UI_KEYS.layoutVersion);
-  if (savedLayoutVersion !== UI_LAYOUT_VERSION) {
-    window.localStorage.setItem(UI_KEYS.layoutVersion, UI_LAYOUT_VERSION);
-  }
-
-  const sidebarWidthStored = getStoredNumber(UI_KEYS.sidebarWidth);
-  const sidebarWidth = clamp(sidebarWidthStored ?? 320, SIDEBAR_MIN, SIDEBAR_MAX);
-  docsSidebar.style.setProperty("--sidebar-width", `${sidebarWidth}px`);
-  docsSidebar.style.width = `${sidebarWidth}px`;
-
-  const initiallyCollapsed = window.localStorage.getItem(UI_KEYS.sidebarCollapsed) === "1";
-  setSidebarCollapsed(initiallyCollapsed);
-
-  chatPane.style.setProperty("--chat-width", "100%");
-  chatPane.style.width = "100%";
-}
-
-function installHorizontalResizer(handle, onMove, onEnd) {
-  if (!handle) return;
-  let dragState = null;
-
-  const stop = () => {
-    if (!dragState) return;
-    dragState = null;
-    document.body.classList.remove("resizing");
-    window.removeEventListener("mousemove", move);
-    window.removeEventListener("mouseup", stop);
-    if (typeof onEnd === "function") onEnd();
-  };
-
-  const move = (event) => {
-    if (!dragState) return;
-    onMove(event, dragState);
-  };
-
-  handle.addEventListener("mousedown", (event) => {
-    event.preventDefault();
-    dragState = {
-      startX: event.clientX,
-      sidebarWidth: docsSidebar ? docsSidebar.getBoundingClientRect().width : 0,
-      chatWidth: chatPane ? chatPane.getBoundingClientRect().width : 0,
-      mainWidth: mainArea ? mainArea.getBoundingClientRect().width : 0,
-    };
-    document.body.classList.add("resizing");
-    window.addEventListener("mousemove", move);
-    window.addEventListener("mouseup", stop);
+  tabButtons.forEach((button) => {
+    const isActive = button.dataset.tab === nextTab;
+    button.classList.toggle("is-active", isActive);
+    button.setAttribute("aria-selected", isActive ? "true" : "false");
+    button.setAttribute("tabindex", isActive ? "0" : "-1");
+    if (isActive && focusButton) {
+      button.focus();
+    }
   });
+
+  tabPanels.forEach((panel) => {
+    const isActive = panel.dataset.tabPanel === nextTab;
+    panel.classList.toggle("is-active", isActive);
+    panel.hidden = !isActive;
+  });
+
+  if (persist) {
+    window.localStorage.setItem(UI_KEYS.activeTab, nextTab);
+  }
+
+  if (logEvent) {
+    addActivityLog("ui.tab.changed", { tab: nextTab });
+  }
 }
 
-function setupLayoutInteractions() {
-  applyInitialLayoutPrefs();
+function resolveInitialTab() {
+  const validTabs = new Set(tabButtons.map((btn) => btn.dataset.tab));
+  const tabFromQuery = new URL(window.location.href).searchParams.get("tab");
+  if (tabFromQuery && validTabs.has(tabFromQuery)) {
+    return tabFromQuery;
+  }
+  const storedTab = window.localStorage.getItem(UI_KEYS.activeTab);
+  if (storedTab && validTabs.has(storedTab)) {
+    return storedTab;
+  }
+  return DEFAULT_TAB;
+}
 
-  if (collapseSidebarBtn) {
-    collapseSidebarBtn.addEventListener("click", () => {
-      const collapsed = workspace?.classList.contains("sidebar-collapsed");
-      setSidebarCollapsed(!collapsed);
+function setupTabs() {
+  if (!tabButtons.length || !tabPanels.length) return;
+
+  tabButtons.forEach((button, index) => {
+    button.addEventListener("click", () => {
+      setActiveTab(button.dataset.tab || DEFAULT_TAB);
     });
-  }
 
-  if (expandSidebarBtn) {
-    expandSidebarBtn.addEventListener("click", () => setSidebarCollapsed(false));
-  }
-
-  installHorizontalResizer(
-    sidebarResizer,
-    (event, state) => {
-      if (!docsSidebar || !workspace || workspace.classList.contains("sidebar-collapsed")) return;
-      const next = clamp(state.sidebarWidth + (event.clientX - state.startX), SIDEBAR_MIN, SIDEBAR_MAX);
-      docsSidebar.style.setProperty("--sidebar-width", `${next}px`);
-      docsSidebar.style.width = `${next}px`;
-    },
-    () => {
-      if (!docsSidebar) return;
-      window.localStorage.setItem(UI_KEYS.sidebarWidth, `${Math.round(docsSidebar.getBoundingClientRect().width)}`);
-    }
-  );
-
-  installHorizontalResizer(
-    chatResizer,
-    (event, state) => {
-      if (!chatPane || !mainArea) return;
-      const minWidth = getChatMinWidth(state.mainWidth);
-      const maxWidth = Math.max(minWidth, state.mainWidth - 20);
-      const next = clamp(state.chatWidth + (event.clientX - state.startX), minWidth, maxWidth);
-      chatPane.style.setProperty("--chat-width", `${next}px`);
-      chatPane.style.width = `${next}px`;
-    },
-    () => {
-      if (!chatPane || !mainArea) return;
-      const width = Math.round(chatPane.getBoundingClientRect().width);
-      const mainWidth = mainArea.getBoundingClientRect().width;
-      const minWidth = getChatMinWidth(mainWidth);
-      const maxWidth = Math.round(Math.max(minWidth, mainWidth - 20));
-      if (width >= maxWidth - 2) {
-        chatPane.style.setProperty("--chat-width", "100%");
-        chatPane.style.width = "100%";
+    button.addEventListener("keydown", (event) => {
+      if (!["ArrowRight", "ArrowLeft", "Home", "End"].includes(event.key)) {
+        return;
       }
-    }
-  );
 
-  if (chatResizer) {
-    chatResizer.addEventListener("dblclick", () => {
-      if (!chatPane) return;
-      chatPane.style.setProperty("--chat-width", "100%");
-      chatPane.style.width = "100%";
+      event.preventDefault();
+      let targetIndex = index;
+      if (event.key === "ArrowRight") {
+        targetIndex = (index + 1) % tabButtons.length;
+      }
+      if (event.key === "ArrowLeft") {
+        targetIndex = (index - 1 + tabButtons.length) % tabButtons.length;
+      }
+      if (event.key === "Home") {
+        targetIndex = 0;
+      }
+      if (event.key === "End") {
+        targetIndex = tabButtons.length - 1;
+      }
+
+      const target = tabButtons[targetIndex];
+      if (!target) return;
+      setActiveTab(target.dataset.tab || DEFAULT_TAB, { focusButton: true });
     });
+  });
+
+  const initialTab = resolveInitialTab();
+  setActiveTab(initialTab, { persist: false, logEvent: false });
+}
+
+function normalizeLogLevel(level) {
+  const normalized = String(level || "info").toLowerCase();
+  if (normalized === "warn" || normalized === "error") {
+    return normalized;
+  }
+  return "info";
+}
+
+function formatLogTimestamp(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  const hh = String(date.getHours()).padStart(2, "0");
+  const mm = String(date.getMinutes()).padStart(2, "0");
+  const ss = String(date.getSeconds()).padStart(2, "0");
+  const ms = String(date.getMilliseconds()).padStart(3, "0");
+  return `${y}-${m}-${d} ${hh}:${mm}:${ss}.${ms}`;
+}
+
+function normalizeLogDetail(detail) {
+  if (detail == null) {
+    return "";
+  }
+  if (typeof detail === "string") {
+    return detail;
+  }
+  try {
+    return JSON.stringify(detail, null, 2);
+  } catch (_error) {
+    return String(detail);
+  }
+}
+
+function renderActivityLogs() {
+  if (!eventLog) return;
+  if (!activityLogs.length) {
+    eventLog.innerHTML = '<div class="log-empty">No activity yet.</div>';
+    return;
   }
 
-  window.addEventListener("resize", () => {
-    if (!chatPane || !mainArea) return;
-    const explicitWidth = chatPane.style.width;
-    if (!explicitWidth || explicitWidth === "100%") {
-      chatPane.style.setProperty("--chat-width", "100%");
-      chatPane.style.width = "100%";
-      return;
-    }
-    const currentWidth = Math.round(chatPane.getBoundingClientRect().width);
-    const mainWidth = mainArea.getBoundingClientRect().width;
-    const minWidth = getChatMinWidth(mainWidth);
-    const maxWidth = Math.max(minWidth, mainWidth - 20);
-    const next = clamp(currentWidth, minWidth, maxWidth);
-    if (next >= maxWidth - 2) {
-      chatPane.style.setProperty("--chat-width", "100%");
-      chatPane.style.width = "100%";
-      return;
-    }
-    chatPane.style.setProperty("--chat-width", `${next}px`);
-    chatPane.style.width = `${next}px`;
+  eventLog.innerHTML = activityLogs
+    .map((entry) => {
+      const level = normalizeLogLevel(entry.level);
+      const detailText = normalizeLogDetail(entry.detail);
+      return (
+        `<article class="log-item log-level-${level}">` +
+          `<div class="log-headline">` +
+            `<span class="log-name">${escapeHtml(entry.name)}</span>` +
+            `<span class="log-meta">` +
+              `<span class="log-level-badge log-level-${level}">${escapeHtml(level)}</span>` +
+              `<span>${escapeHtml(entry.timestamp)}</span>` +
+            `</span>` +
+          `</div>` +
+          `<pre class="log-detail">${escapeHtml(detailText)}</pre>` +
+        `</article>`
+      );
+    })
+    .join("");
+}
+
+function addActivityLog(name, detail = {}, level = "info") {
+  if (SUPPRESSED_ACTIVITY_LOG_EVENTS.has(String(name || ""))) {
+    return;
+  }
+  const entry = {
+    id: `log-${++logSequence}`,
+    name: String(name || "event"),
+    detail,
+    level: normalizeLogLevel(level),
+    timestamp: formatLogTimestamp(new Date()),
+  };
+  activityLogs.unshift(entry);
+  if (activityLogs.length > ACTIVITY_LOG_LIMIT) {
+    activityLogs = activityLogs.slice(0, ACTIVITY_LOG_LIMIT);
+  }
+  renderActivityLogs();
+}
+
+function setupLogInteractions() {
+  renderActivityLogs();
+  clearLogsBtn?.addEventListener("click", () => {
+    const removedEntries = activityLogs.length;
+    activityLogs = [];
+    logSequence = 0;
+    renderActivityLogs();
+    addActivityLog("logs.cleared", { removed_entries: removedEntries });
   });
 }
 
@@ -225,27 +237,79 @@ function getDocProgress(doc) {
 
 function getDocStatusLabel(doc) {
   const ready = isDocReady(doc);
+  const metadata = getDocMetadata(doc);
+  const reviewState = String(metadata.out_of_place_review_state || "").toLowerCase();
+  if (reviewState === "needs_review") {
+    const predictedTypeRaw = String(
+      metadata.out_of_place_review_predicted_type || metadata.doc_type || "other"
+    ).trim();
+    const predictedType = predictedTypeRaw.replace(/_/g, " ");
+    const confidenceValue = Number(metadata.out_of_place_review_confidence);
+    const confidenceSuffix = Number.isFinite(confidenceValue) && confidenceValue > 0
+      ? `, ${confidenceValue.toFixed(2)}`
+      : "";
+    return `${doc.status}${ready ? "" : " (not selectable yet)"} | please review (${predictedType}${confidenceSuffix})`;
+  }
   return `${doc.status}${ready ? "" : " (not selectable yet)"}`;
 }
 
 function shouldPollDocs(docs) {
   return (docs || []).some((doc) => {
     const status = String(doc.status || "").toLowerCase();
-    return status === "queued" || status === "processing";
+    if (status === "queued" || status === "processing") {
+      return true;
+    }
+    const metadata = getDocMetadata(doc);
+    const hasReviewContext = Boolean(metadata.folder_id) && Boolean(metadata.expected_doc_type);
+    const hasReviewResult = Boolean(metadata.out_of_place_review_last_checked_at)
+      || Boolean(metadata.out_of_place_review_state);
+    return hasReviewContext && !hasReviewResult;
   });
+}
+
+function buildDocsSnapshot(docs) {
+  return (docs || [])
+    .map((doc) => `${doc.id}:${doc.status}`)
+    .sort()
+    .join("|");
+}
+
+function summarizeDocs(docs) {
+  const summary = {
+    total: docs.length,
+    ready: 0,
+    queued: 0,
+    processing: 0,
+    failed: 0,
+  };
+
+  docs.forEach((doc) => {
+    const status = String(doc.status || "").toLowerCase();
+    if (status === "ready") summary.ready += 1;
+    if (status === "queued") summary.queued += 1;
+    if (status === "processing") summary.processing += 1;
+    if (status === "failed") summary.failed += 1;
+  });
+
+  return summary;
 }
 
 function syncDocsPolling() {
   const needsPolling = shouldPollDocs(docsCache);
   if (needsPolling && !docsPollingTimer) {
+    addActivityLog("documents.polling.started", { interval_ms: 1500 });
     docsPollingTimer = setInterval(() => {
-      fetchDocs().catch((err) => console.error("Doc polling failed", err));
+      fetchDocs("poll").catch((err) => {
+        console.error("Doc polling failed", err);
+        addActivityLog("documents.polling.error", { error: err.message }, "error");
+      });
     }, 1500);
     return;
   }
   if (!needsPolling && docsPollingTimer) {
     clearInterval(docsPollingTimer);
     docsPollingTimer = null;
+    addActivityLog("documents.polling.stopped", {});
   }
 }
 
@@ -264,6 +328,7 @@ function syncSelectionToDocs(docs) {
 }
 
 function updateScopeControls(docs) {
+  if (!scopeSummary || !selectAllDocs) return;
   const readyDocIds = getReadyDocIds(docs);
   const selectedCount = readyDocIds.filter((docId) => selectedDocIds.has(docId)).length;
   scopeSummary.textContent = `${selectedCount}/${readyDocIds.length} selected`;
@@ -274,10 +339,18 @@ function updateScopeControls(docs) {
 }
 
 async function fetchHealth() {
-  const res = await fetch("/api/health");
-  const data = await res.json();
-  if (statusEl) {
-    statusEl.textContent = data.vlm_enabled ? "VLM enabled" : "VLM disabled";
+  try {
+    const res = await fetch("/api/health");
+    const data = await res.json();
+    if (statusEl) {
+      statusEl.textContent = data.vlm_enabled ? "VLM enabled" : "VLM disabled";
+    }
+    addActivityLog("health.checked", { vlm_enabled: !!data.vlm_enabled });
+  } catch (error) {
+    if (statusEl) {
+      statusEl.textContent = "Health check failed";
+    }
+    addActivityLog("health.error", { error: error.message }, "error");
   }
 }
 
@@ -297,8 +370,10 @@ function renderDocs(docs) {
     const progressPct = getDocProgress(doc);
     const statusLower = String(doc.status || "").toLowerCase();
     const statusLabel = getDocStatusLabel(doc);
+    const metadata = getDocMetadata(doc);
+    const isReviewWarning = String(metadata.out_of_place_review_state || "").toLowerCase() === "needs_review";
     const li = document.createElement("li");
-    li.className = "doc-item";
+    li.className = isReviewWarning ? "doc-item doc-item-review-warning" : "doc-item";
     li.innerHTML = `
       <div class="doc-main-wrap">
         <div class="doc-controls">
@@ -326,24 +401,39 @@ function renderDocs(docs) {
   updateScopeControls(docs);
 }
 
-async function fetchDocs() {
-  const res = await fetch("/api/documents");
-  const data = await res.json();
-  docsCache = data.documents || [];
-  syncSelectionToDocs(docsCache);
-  renderDocs(docsCache);
-  syncDocsPolling();
+async function fetchDocs(reason = "manual") {
+  try {
+    const res = await fetch("/api/documents");
+    const data = await res.json();
+    docsCache = data.documents || [];
+    syncSelectionToDocs(docsCache);
+    renderDocs(docsCache);
+    const nextSnapshot = buildDocsSnapshot(docsCache);
+    if (nextSnapshot !== docsSnapshotSignature) {
+      docsSnapshotSignature = nextSnapshot;
+      addActivityLog("documents.synced", {
+        reason,
+        ...summarizeDocs(docsCache),
+      });
+    }
+    syncDocsPolling();
+  } catch (error) {
+    addActivityLog("documents.sync.error", { reason, error: error.message }, "error");
+    throw error;
+  }
 }
 
 function addMessage(text, role = "assistant") {
+  if (!chatLog) return;
   const div = document.createElement("div");
   div.className = `message ${role}`;
   div.innerHTML = `<div class="meta">${role}</div><div>${text}</div>`;
-  chatLog.appendChild(div);
-  chatLog.scrollTop = chatLog.scrollHeight;
+  chatLog.prepend(div);
+  chatLog.scrollTop = 0;
 }
 
 function addThinkingIndicator() {
+  if (!chatLog) return null;
   const div = document.createElement("div");
   div.className = "message assistant thinking-message";
 
@@ -367,8 +457,8 @@ function addThinkingIndicator() {
 
   div.appendChild(meta);
   div.appendChild(indicator);
-  chatLog.appendChild(div);
-  chatLog.scrollTop = chatLog.scrollHeight;
+  chatLog.prepend(div);
+  chatLog.scrollTop = 0;
   return div;
 }
 
@@ -384,6 +474,18 @@ function escapeHtml(value) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+async function parseApiJson(res) {
+  const raw = await res.text();
+  if (!raw) {
+    return {};
+  }
+  try {
+    return JSON.parse(raw);
+  } catch (_error) {
+    return { error: raw.trim() || `Request failed (${res.status})` };
+  }
 }
 
 function formatAnswerParagraphs(text) {
@@ -434,98 +536,150 @@ function renderAssistantResponse(answer, sources, includeSummaries) {
 
 async function uploadFiles(files) {
   if (!files || files.length === 0) {
-    uploadMsg.textContent = "Select a file or folder first.";
+    if (uploadMsg) {
+      uploadMsg.textContent = "Select a file or folder first.";
+    }
+    addActivityLog("upload.blocked", { reason: "no_files_selected" }, "warn");
     return;
   }
-  uploadMsg.textContent = `Uploading ${files.length} file(s)...`;
+
+  if (uploadMsg) {
+    uploadMsg.textContent = `Uploading ${files.length} file(s)...`;
+  }
+  addActivityLog("upload.started", {
+    file_count: files.length,
+    files: Array.from(files).slice(0, 40).map((file) => file.name),
+  });
+
   let successCount = 0;
   const failures = [];
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
-    if (file.name.startsWith('.')) continue; // skip hidden files like .DS_Store
+    if (file.name.startsWith(".")) {
+      addActivityLog("upload.skipped_hidden", { file: file.name }, "warn");
+      continue;
+    }
 
     const formData = new FormData();
     formData.append("file", file);
     try {
-      uploadMsg.textContent = `Uploading ${i + 1}/${files.length}: ${file.name}...`;
+      if (uploadMsg) {
+        uploadMsg.textContent = `Uploading ${i + 1}/${files.length}: ${file.name}...`;
+      }
       const res = await fetch("/api/documents", { method: "POST", body: formData });
       if (res.ok) {
         successCount++;
+        addActivityLog("upload.file.queued", { file: file.name, index: i + 1, total: files.length });
       } else {
         const data = await res.json().catch(() => ({}));
-        failures.push(`${file.name}: ${data.error || `Upload failed (${res.status})`}`);
+        const message = data.error || `Upload failed (${res.status})`;
+        failures.push(`${file.name}: ${message}`);
+        addActivityLog("upload.file.failed", { file: file.name, status: res.status, error: message }, "error");
       }
     } catch (err) {
       console.error("Upload failed for", file.name, err);
       failures.push(`${file.name}: ${err.message}`);
+      addActivityLog("upload.file.error", { file: file.name, error: err.message }, "error");
     }
   }
-  uploadMsg.textContent = failures.length
-    ? `Queued ${successCount} file(s), ${failures.length} failed.`
-    : `Queued ${successCount} file(s).`;
+
+  if (uploadMsg) {
+    uploadMsg.textContent = failures.length
+      ? `Queued ${successCount} file(s), ${failures.length} failed.`
+      : `Queued ${successCount} file(s).`;
+  }
+  addActivityLog("upload.completed", {
+    queued_files: successCount,
+    failed_files: failures.length,
+    failures: failures.slice(0, 20),
+  }, failures.length ? "warn" : "info");
+
   if (failures.length) {
     addMessage(`Upload issues:\n${failures.slice(0, 5).join("\n")}`, "assistant");
   }
-  fileInput.value = "";
-  const folderInput = document.getElementById("folderInput");
-  if (folderInput) folderInput.value = "";
-  await fetchDocs();
+  if (fileInput) {
+    fileInput.value = "";
+  }
+  if (folderInput) {
+    folderInput.value = "";
+  }
+  await fetchDocs("upload");
 }
 
-uploadBtn.addEventListener("click", () => uploadFiles(fileInput.files));
+uploadBtn?.addEventListener("click", () => uploadFiles(fileInput?.files));
 
-const folderInput = document.getElementById("folderInput");
-const uploadFolderBtn = document.getElementById("uploadFolderBtn");
-
-uploadFolderBtn.addEventListener("click", () => {
-  folderInput.click();
+uploadFolderBtn?.addEventListener("click", () => {
+  folderInput?.click();
 });
 
-folderInput.addEventListener("change", () => {
+folderInput?.addEventListener("change", () => {
   if (folderInput.files.length > 0) {
+    addActivityLog("upload.folder.selected", { file_count: folderInput.files.length });
     uploadFiles(folderInput.files);
   }
 });
 
-const driveUrlInput = document.getElementById("driveUrlInput");
-const driveImportBtn = document.getElementById("driveImportBtn");
-
-driveImportBtn.addEventListener("click", async () => {
-  const url = driveUrlInput.value.trim();
+driveImportBtn?.addEventListener("click", async () => {
+  const url = driveUrlInput?.value.trim() || "";
   if (!url) {
-    uploadMsg.textContent = "Paste a Drive URL first.";
+    if (uploadMsg) {
+      uploadMsg.textContent = "Paste a Drive URL first.";
+    }
+    addActivityLog("drive_import.blocked", { reason: "missing_url" }, "warn");
     return;
   }
-  uploadMsg.textContent = "Fetching from Drive...";
+  if (uploadMsg) {
+    uploadMsg.textContent = "Fetching from Drive...";
+  }
+  addActivityLog("drive_import.started", { url });
   try {
     const res = await fetch("/api/documents/drive", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url })
+      body: JSON.stringify({ url }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "Import failed");
-    uploadMsg.textContent = `Queued ${data.count} file(s) from Drive.`;
-    driveUrlInput.value = "";
-    await fetchDocs();
+    if (uploadMsg) {
+      uploadMsg.textContent = `Queued ${data.count} file(s) from Drive.`;
+    }
+    if (driveUrlInput) {
+      driveUrlInput.value = "";
+    }
+    addActivityLog("drive_import.completed", { queued_files: data.count });
+    await fetchDocs("drive_import");
   } catch (err) {
-    uploadMsg.textContent = `Drive import error: ${err.message}`;
+    if (uploadMsg) {
+      uploadMsg.textContent = `Drive import error: ${err.message}`;
+    }
+    addActivityLog("drive_import.error", { error: err.message, url }, "error");
     console.error(err);
   }
 });
 
-sendBtn.addEventListener("click", async () => {
-  const message = chatInput.value.trim();
+sendBtn?.addEventListener("click", async () => {
+  const message = chatInput?.value.trim() || "";
   if (!message) return;
   const scopedDocIds = Array.from(selectedDocIds);
   if (scopedDocIds.length === 0) {
     addMessage("Select at least one ready document before asking a question.", "assistant");
+    addActivityLog("chat.blocked", { reason: "no_ready_documents_selected" }, "warn");
     return;
   }
 
   addMessage(message, "user");
-  chatInput.value = "";
+  if (chatInput) {
+    chatInput.value = "";
+  }
   const includeSummaries = !!includeDocSummaries?.checked;
+  const startedAt = Date.now();
+  addActivityLog("chat.request.sent", {
+    message,
+    doc_ids: scopedDocIds,
+    include_document_summaries: includeSummaries,
+    conversation_id: conversationId,
+  });
+
   const thinkingIndicator = addThinkingIndicator();
   try {
     const res = await fetch("/api/chat", {
@@ -535,28 +689,41 @@ sendBtn.addEventListener("click", async () => {
         message,
         doc_ids: scopedDocIds,
         include_document_summaries: includeSummaries,
+        conversation_id: conversationId,
       }),
     });
-    const data = await res.json();
+    const data = await parseApiJson(res);
     if (!res.ok) {
-      throw new Error(data.error || `Chat failed (${res.status})`);
+      throw new Error(data.error || data.detail || `Chat failed (${res.status})`);
+    }
+    const nextConversationId = String(data.conversation_id || "").trim();
+    if (nextConversationId) {
+      conversationId = nextConversationId;
     }
     const responseIncludeSummaries = data.include_document_summaries !== false;
     removeThinkingIndicator(thinkingIndicator);
     addMessage(renderAssistantResponse(data.answer, data.sources || [], responseIncludeSummaries));
+    addActivityLog("chat.response.received", {
+      duration_ms: Date.now() - startedAt,
+      source_count: Array.isArray(data.sources) ? data.sources.length : 0,
+      include_document_summaries: responseIncludeSummaries,
+      conversation_id: conversationId,
+      answer_preview: String(data.answer || "").slice(0, 220),
+    });
   } catch (error) {
     removeThinkingIndicator(thinkingIndicator);
     addMessage(`Chat failed: ${error.message}`, "assistant");
+    addActivityLog("chat.response.error", { duration_ms: Date.now() - startedAt, error: error.message }, "error");
   }
 });
 
-chatInput.addEventListener("keydown", (event) => {
+chatInput?.addEventListener("keydown", (event) => {
   if (event.key !== "Enter" || event.shiftKey) return;
   event.preventDefault();
-  sendBtn.click();
+  sendBtn?.click();
 });
 
-selectAllDocs.addEventListener("change", () => {
+selectAllDocs?.addEventListener("change", () => {
   const readyDocIds = getReadyDocIds(docsCache);
   if (selectAllDocs.checked) {
     scopeMode = "all";
@@ -566,9 +733,14 @@ selectAllDocs.addEventListener("change", () => {
     selectedDocIds = new Set();
   }
   renderDocs(docsCache);
+  addActivityLog("documents.scope.select_all", {
+    checked: selectAllDocs.checked,
+    selected_count: selectedDocIds.size,
+    ready_count: readyDocIds.length,
+  });
 });
 
-docList.addEventListener("change", (event) => {
+docList?.addEventListener("change", (event) => {
   const target = event.target;
   if (!(target instanceof HTMLInputElement) || !target.classList.contains("doc-select-checkbox")) {
     return;
@@ -582,13 +754,14 @@ docList.addEventListener("change", (event) => {
     selectedDocIds.delete(docId);
   }
   updateScopeControls(docsCache);
+  addActivityLog("documents.scope.toggled", {
+    doc_id: docId,
+    selected: target.checked,
+    selected_count: selectedDocIds.size,
+  });
 });
 
-fetchHealth();
-fetchDocs();
-setupLayoutInteractions();
-
-docList.addEventListener("click", async (event) => {
+docList?.addEventListener("click", async (event) => {
   const target = event.target;
   if (!(target instanceof Element)) {
     return;
@@ -600,10 +773,15 @@ docList.addEventListener("click", async (event) => {
   if (!docId) return;
 
   const confirmed = window.confirm("Delete this document and all indexed chunks?");
-  if (!confirmed) return;
+  if (!confirmed) {
+    addActivityLog("documents.delete.cancelled", { doc_id: docId }, "warn");
+    return;
+  }
 
   deleteBtn.disabled = true;
   deleteBtn.classList.add("is-loading");
+  addActivityLog("documents.delete.started", { doc_id: docId });
+
   try {
     const res = await fetch(`/api/documents/${encodeURIComponent(docId)}`, { method: "DELETE" });
     if (!res.ok) {
@@ -611,21 +789,27 @@ docList.addEventListener("click", async (event) => {
       const message = data.error || `Delete failed (${res.status})`;
       throw new Error(message);
     }
-    await fetchDocs();
+    await fetchDocs("delete_single");
     addMessage(`Deleted document ${docId}.`, "assistant");
+    addActivityLog("documents.delete.completed", { doc_id: docId });
   } catch (error) {
     addMessage(`Delete failed: ${error.message}`, "assistant");
     deleteBtn.disabled = false;
     deleteBtn.classList.remove("is-loading");
+    addActivityLog("documents.delete.error", { doc_id: docId, error: error.message }, "error");
   }
 });
 
-deleteAllBtn.addEventListener("click", async () => {
+deleteAllBtn?.addEventListener("click", async () => {
   const confirmed = window.confirm("Delete ALL documents and indexed chunks?");
-  if (!confirmed) return;
+  if (!confirmed) {
+    addActivityLog("documents.delete_all.cancelled", {}, "warn");
+    return;
+  }
 
   deleteAllBtn.disabled = true;
   deleteAllBtn.textContent = "Deleting...";
+  addActivityLog("documents.delete_all.started", {});
   try {
     const res = await fetch("/api/documents", { method: "DELETE" });
     if (!res.ok) {
@@ -634,12 +818,29 @@ deleteAllBtn.addEventListener("click", async () => {
       throw new Error(message);
     }
     const data = await res.json().catch(() => ({}));
-    await fetchDocs();
+    await fetchDocs("delete_all");
     addMessage(`Deleted ${data.deleted_documents ?? 0} documents.`, "assistant");
+    addActivityLog("documents.delete_all.completed", {
+      deleted_documents: data.deleted_documents ?? 0,
+    });
   } catch (error) {
     addMessage(`Delete all failed: ${error.message}`, "assistant");
+    addActivityLog("documents.delete_all.error", { error: error.message }, "error");
   } finally {
     deleteAllBtn.disabled = false;
     deleteAllBtn.textContent = "Delete All";
   }
+});
+
+setupTabs();
+setupLogInteractions();
+addActivityLog("ui.ready", {
+  tabs: tabButtons.map((btn) => btn.dataset.tab),
+  default_tab: window.localStorage.getItem(UI_KEYS.activeTab) || DEFAULT_TAB,
+});
+
+fetchHealth();
+fetchDocs("initial").catch((error) => {
+  console.error(error);
+  addActivityLog("documents.initial_load.error", { error: error.message }, "error");
 });

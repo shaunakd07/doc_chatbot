@@ -11,4 +11,4 @@ x-upload to github-x
 2) move to AWS EC2 as is
 3) migration from sql-> postgres
 4) Create API, monolithic->microservices, enhance code
-5) Containerize (docke+r, Kubernetes)
+5) Containerize (docker, Kubernetes)

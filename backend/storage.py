@@ -1,6 +1,7 @@
 import json
 import logging
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -89,6 +90,24 @@ def _row_to_diagram_graph(row: Any) -> Dict[str, Any]:
     return record
 
 
+def _row_to_document_fact(row: Any) -> Dict[str, Any]:
+    record = dict(row)
+    record["metadata"] = _decode_json_field(record.get("metadata")) or {}
+    return record
+
+
+def _row_to_chat_session(row: Any) -> Dict[str, Any]:
+    session = dict(row)
+    session["metadata"] = _decode_json_field(session.get("metadata")) or {}
+    return session
+
+
+def _row_to_chat_message(row: Any) -> Dict[str, Any]:
+    message = dict(row)
+    message["metadata"] = _decode_json_field(message.get("metadata")) or {}
+    return message
+
+
 def _vector_literal_from_array(vector: np.ndarray) -> str:
     values = [f"{float(v):.8f}" for v in vector.astype("float32").tolist()]
     return "[" + ",".join(values) + "]"
@@ -145,6 +164,27 @@ def init_db() -> None:
             )
             cur.execute("CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc_id)")
             cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS document_facts (
+                    id TEXT PRIMARY KEY,
+                    doc_id TEXT NOT NULL,
+                    fact_type TEXT NOT NULL CHECK (fact_type IN ('date', 'amount', 'party')),
+                    canonical_value TEXT NOT NULL,
+                    raw_value TEXT NOT NULL,
+                    page INTEGER,
+                    chunk_id TEXT,
+                    evidence_text TEXT NOT NULL,
+                    confidence REAL DEFAULT 0,
+                    metadata JSONB DEFAULT '{}'::jsonb,
+                    FOREIGN KEY(doc_id) REFERENCES documents(id) ON DELETE CASCADE,
+                    FOREIGN KEY(chunk_id) REFERENCES chunks(id) ON DELETE SET NULL
+                )
+                """
+            )
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_document_facts_doc ON document_facts(doc_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_document_facts_type ON document_facts(fact_type)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_document_facts_canonical ON document_facts(canonical_value)")
+            cur.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS embeddings (
                     chunk_id TEXT PRIMARY KEY,
@@ -172,6 +212,32 @@ def init_db() -> None:
             )
             cur.execute("CREATE INDEX IF NOT EXISTS idx_diagram_graph_doc ON diagram_graphs(doc_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_diagram_graph_image ON diagram_graphs(image_path)")
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chat_sessions (
+                    id TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    summary TEXT DEFAULT '',
+                    metadata JSONB DEFAULT '{}'::jsonb
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chat_messages (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    metadata JSONB DEFAULT '{}'::jsonb,
+                    FOREIGN KEY(session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE
+                )
+                """
+            )
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_created ON chat_messages(created_at DESC)")
             try:
                 cur.execute(
                     """
@@ -216,6 +282,27 @@ def init_db() -> None:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_chunks_doc ON chunks(doc_id)")
         cur.execute(
             """
+            CREATE TABLE IF NOT EXISTS document_facts (
+                id TEXT PRIMARY KEY,
+                doc_id TEXT NOT NULL,
+                fact_type TEXT NOT NULL CHECK (fact_type IN ('date', 'amount', 'party')),
+                canonical_value TEXT NOT NULL,
+                raw_value TEXT NOT NULL,
+                page INTEGER,
+                chunk_id TEXT,
+                evidence_text TEXT NOT NULL,
+                confidence REAL DEFAULT 0,
+                metadata TEXT,
+                FOREIGN KEY(doc_id) REFERENCES documents(id) ON DELETE CASCADE,
+                FOREIGN KEY(chunk_id) REFERENCES chunks(id) ON DELETE SET NULL
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_document_facts_doc ON document_facts(doc_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_document_facts_type ON document_facts(fact_type)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_document_facts_canonical ON document_facts(canonical_value)")
+        cur.execute(
+            """
             CREATE TABLE IF NOT EXISTS embeddings (
                 chunk_id TEXT PRIMARY KEY,
                 vector BLOB NOT NULL,
@@ -242,6 +329,32 @@ def init_db() -> None:
         )
         cur.execute("CREATE INDEX IF NOT EXISTS idx_diagram_graph_doc ON diagram_graphs(doc_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_diagram_graph_image ON diagram_graphs(image_path)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chat_sessions (
+                id TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                summary TEXT DEFAULT '',
+                metadata TEXT
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                metadata TEXT,
+                FOREIGN KEY(session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_created ON chat_messages(created_at DESC)")
         conn.commit()
 
 
@@ -329,6 +442,7 @@ def delete_document(doc_id: str) -> bool:
         if not row:
             return False
         if _is_postgres():
+            conn.execute("DELETE FROM document_facts WHERE doc_id = %s", (doc_id,))
             conn.execute(
                 "DELETE FROM embeddings WHERE chunk_id IN (SELECT id FROM chunks WHERE doc_id = %s)",
                 (doc_id,),
@@ -337,6 +451,7 @@ def delete_document(doc_id: str) -> bool:
             conn.execute("DELETE FROM chunks WHERE doc_id = %s", (doc_id,))
             conn.execute("DELETE FROM documents WHERE id = %s", (doc_id,))
         else:
+            conn.execute("DELETE FROM document_facts WHERE doc_id = ?", (doc_id,))
             conn.execute(
                 "DELETE FROM embeddings WHERE chunk_id IN (SELECT id FROM chunks WHERE doc_id = ?)",
                 (doc_id,),
@@ -353,6 +468,7 @@ def delete_all_documents() -> int:
         if _is_postgres():
             row = conn.execute("SELECT COUNT(*) AS c FROM documents").fetchone()
             count = int(row["c"]) if row else 0
+            conn.execute("DELETE FROM document_facts")
             conn.execute("DELETE FROM diagram_graphs")
             conn.execute("DELETE FROM embeddings")
             conn.execute("DELETE FROM chunks")
@@ -360,6 +476,7 @@ def delete_all_documents() -> int:
         else:
             row = conn.execute("SELECT COUNT(*) AS c FROM documents").fetchone()
             count = int(row["c"]) if row else 0
+            conn.execute("DELETE FROM document_facts")
             conn.execute("DELETE FROM diagram_graphs")
             conn.execute("DELETE FROM embeddings")
             conn.execute("DELETE FROM chunks")
@@ -417,6 +534,99 @@ def list_chunks() -> List[Dict[str, Any]]:
     with _connect() as conn:
         rows = conn.execute("SELECT * FROM chunks").fetchall()
     return [_row_to_chunk(row) for row in rows]
+
+
+def add_document_facts(records: Iterable[Dict[str, Any]]) -> None:
+    rows: list[tuple[Any, ...]] = []
+    for record in records:
+        fact_id = str(record.get("id") or "").strip()
+        doc_id = str(record.get("doc_id") or "").strip()
+        fact_type = str(record.get("fact_type") or "").strip().lower()
+        canonical_value = str(record.get("canonical_value") or "").strip()
+        raw_value = str(record.get("raw_value") or "").strip()
+        evidence_text = str(record.get("evidence_text") or "").strip()
+        if not fact_id or not doc_id or fact_type not in {"date", "amount", "party"}:
+            continue
+        if not canonical_value or not raw_value or not evidence_text:
+            continue
+        rows.append(
+            (
+                fact_id,
+                doc_id,
+                fact_type,
+                canonical_value,
+                raw_value,
+                record.get("page"),
+                str(record.get("chunk_id") or "").strip() or None,
+                evidence_text,
+                float(record.get("confidence") or 0.0),
+                json.dumps(record.get("metadata") or {}),
+            )
+        )
+    if not rows:
+        return
+
+    with _connect() as conn:
+        if _is_postgres():
+            conn.executemany(
+                """
+                INSERT INTO document_facts (
+                    id, doc_id, fact_type, canonical_value, raw_value, page, chunk_id, evidence_text, confidence, metadata
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                """,
+                rows,
+            )
+        else:
+            conn.executemany(
+                """
+                INSERT INTO document_facts (
+                    id, doc_id, fact_type, canonical_value, raw_value, page, chunk_id, evidence_text, confidence, metadata
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+        conn.commit()
+
+
+def list_document_facts(
+    *,
+    doc_ids: Optional[List[str]] = None,
+    fact_types: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    query = "SELECT * FROM document_facts"
+    clauses: list[str] = []
+    params: list[Any] = []
+
+    if doc_ids:
+        cleaned_doc_ids = [str(doc_id or "").strip() for doc_id in doc_ids if str(doc_id or "").strip()]
+        if cleaned_doc_ids:
+            placeholders = ",".join("%s" if _is_postgres() else "?" for _ in cleaned_doc_ids)
+            clauses.append(f"doc_id IN ({placeholders})")
+            params.extend(cleaned_doc_ids)
+
+    if fact_types:
+        cleaned_fact_types = [
+            str(fact_type or "").strip().lower()
+            for fact_type in fact_types
+            if str(fact_type or "").strip().lower() in {"date", "amount", "party"}
+        ]
+        if cleaned_fact_types:
+            placeholders = ",".join("%s" if _is_postgres() else "?" for _ in cleaned_fact_types)
+            clauses.append(f"fact_type IN ({placeholders})")
+            params.extend(cleaned_fact_types)
+
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    if _is_postgres():
+        query += " ORDER BY doc_id, page NULLS LAST, fact_type, canonical_value"
+    else:
+        query += " ORDER BY doc_id, page, fact_type, canonical_value"
+
+    with _connect() as conn:
+        rows = conn.execute(query, tuple(params)).fetchall()
+    return [_row_to_document_fact(row) for row in rows]
 
 
 def add_embeddings(vectors: Iterable[Tuple[str, bytes, int]]) -> None:
@@ -635,3 +845,167 @@ def get_diagram_graph(graph_id: str) -> Optional[Dict[str, Any]]:
         else:
             row = conn.execute("SELECT * FROM diagram_graphs WHERE id = ?", (graph_id,)).fetchone()
     return _row_to_diagram_graph(row) if row else None
+
+
+def get_chat_session(session_id: str) -> Optional[Dict[str, Any]]:
+    session_key = str(session_id or "").strip()
+    if not session_key:
+        return None
+    with _connect() as conn:
+        if _is_postgres():
+            row = conn.execute("SELECT * FROM chat_sessions WHERE id = %s", (session_key,)).fetchone()
+        else:
+            row = conn.execute("SELECT * FROM chat_sessions WHERE id = ?", (session_key,)).fetchone()
+    return _row_to_chat_session(row) if row else None
+
+
+def upsert_chat_session(
+    session_id: str,
+    *,
+    summary: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+    merge_metadata: bool = True,
+) -> Dict[str, Any]:
+    session_key = str(session_id or "").strip()
+    if not session_key:
+        raise ValueError("session_id is required")
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    existing = get_chat_session(session_key)
+    existing_metadata = existing.get("metadata") if isinstance(existing, dict) else {}
+    existing_metadata = existing_metadata if isinstance(existing_metadata, dict) else {}
+    merged_metadata: Dict[str, Any]
+    if merge_metadata:
+        merged_metadata = dict(existing_metadata)
+        if isinstance(metadata, dict):
+            merged_metadata.update(metadata)
+    else:
+        merged_metadata = dict(metadata or {})
+
+    next_summary = str(summary if summary is not None else (existing.get("summary") if isinstance(existing, dict) else "") or "")
+    metadata_payload = json.dumps(merged_metadata or {})
+    if existing is None:
+        with _connect() as conn:
+            if _is_postgres():
+                conn.execute(
+                    """
+                    INSERT INTO chat_sessions (id, created_at, updated_at, summary, metadata)
+                    VALUES (%s, %s, %s, %s, %s::jsonb)
+                    """,
+                    (session_key, now_iso, now_iso, next_summary, metadata_payload),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO chat_sessions (id, created_at, updated_at, summary, metadata)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (session_key, now_iso, now_iso, next_summary, metadata_payload),
+                )
+            conn.commit()
+    else:
+        with _connect() as conn:
+            if _is_postgres():
+                conn.execute(
+                    """
+                    UPDATE chat_sessions
+                    SET updated_at = %s, summary = %s, metadata = %s::jsonb
+                    WHERE id = %s
+                    """,
+                    (now_iso, next_summary, metadata_payload, session_key),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE chat_sessions
+                    SET updated_at = ?, summary = ?, metadata = ?
+                    WHERE id = ?
+                    """,
+                    (now_iso, next_summary, metadata_payload, session_key),
+                )
+            conn.commit()
+    refreshed = get_chat_session(session_key)
+    if refreshed is None:
+        raise RuntimeError(f"Failed to upsert chat session {session_key}")
+    return refreshed
+
+
+def add_chat_message(
+    message_id: str,
+    session_id: str,
+    role: str,
+    content: str,
+    created_at: str,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    row_id = str(message_id or "").strip()
+    session_key = str(session_id or "").strip()
+    role_value = str(role or "").strip().lower()
+    body = str(content or "").strip()
+    created_value = str(created_at or "").strip() or datetime.now(timezone.utc).isoformat()
+    metadata_payload = json.dumps(metadata or {})
+    if not row_id or not session_key or not role_value or not body:
+        return
+    with _connect() as conn:
+        if _is_postgres():
+            conn.execute(
+                """
+                INSERT INTO chat_messages (id, session_id, role, content, created_at, metadata)
+                VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+                """,
+                (row_id, session_key, role_value, body, created_value, metadata_payload),
+            )
+            conn.execute(
+                "UPDATE chat_sessions SET updated_at = %s WHERE id = %s",
+                (datetime.now(timezone.utc).isoformat(), session_key),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO chat_messages (id, session_id, role, content, created_at, metadata)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (row_id, session_key, role_value, body, created_value, metadata_payload),
+            )
+            conn.execute(
+                "UPDATE chat_sessions SET updated_at = ? WHERE id = ?",
+                (datetime.now(timezone.utc).isoformat(), session_key),
+            )
+        conn.commit()
+
+
+def list_chat_messages(
+    session_id: str,
+    *,
+    limit: int = 20,
+    ascending: bool = True,
+) -> List[Dict[str, Any]]:
+    session_key = str(session_id or "").strip()
+    if not session_key:
+        return []
+    page_size = max(1, int(limit))
+    with _connect() as conn:
+        if _is_postgres():
+            rows = conn.execute(
+                """
+                SELECT * FROM chat_messages
+                WHERE session_id = %s
+                ORDER BY created_at DESC
+                LIMIT %s
+                """,
+                (session_key, page_size),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT * FROM chat_messages
+                WHERE session_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (session_key, page_size),
+            ).fetchall()
+    payload = [_row_to_chat_message(row) for row in rows]
+    if ascending:
+        payload.reverse()
+    return payload

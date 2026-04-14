@@ -20,6 +20,17 @@ DOC_TYPE_HINTS: dict[str, list[str]] = {
     "proposal": ["proposal", "business proposal", "technical proposal"],
     "contract": ["contract", "agreement", "master service agreement", "msa", "service agreement"],
     "statement_of_work": ["statement of work", "sow", "scope of work"],
+    "receipt": ["receipt", "payment receipt", "cash receipt", "sales receipt"],
+    "hr_form": [
+        "hr form",
+        "human resources form",
+        "employee form",
+        "onboarding form",
+        "timesheet",
+        "leave request",
+        "w-4",
+        "i-9",
+    ],
     "presentation": ["presentation", "slide deck", "slides", "ppt", "pptx"],
     "spreadsheet": ["spreadsheet", "worksheet", "excel", "xlsx", "xls"],
     "report": ["report", "analysis report", "summary report"],
@@ -34,6 +45,8 @@ DOC_TYPE_LABELS: dict[str, str] = {
     "proposal": "proposal",
     "contract": "contract",
     "statement_of_work": "statement of work",
+    "receipt": "receipt",
+    "hr_form": "HR form",
     "presentation": "presentation",
     "spreadsheet": "spreadsheet",
     "report": "report",
@@ -52,6 +65,14 @@ _EXTRA_ALIASES: dict[str, str] = {
     "contracts": "contract",
     "agreements": "contract",
     "sows": "statement_of_work",
+    "receipts": "receipt",
+    "hr forms": "hr_form",
+    "human resources": "hr_form",
+    "human resources form": "hr_form",
+    "employee forms": "hr_form",
+    "onboarding": "hr_form",
+    "w4": "hr_form",
+    "i9": "hr_form",
     "slides": "presentation",
     "decks": "presentation",
     "presentations": "presentation",
@@ -186,4 +207,3 @@ def extract_query_doc_type_candidates(question: str) -> List[str]:
         if alias_tokens and all(token in tokens for token in alias_tokens):
             found.add(doc_type)
     return sorted(found)
-

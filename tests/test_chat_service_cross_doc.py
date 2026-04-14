@@ -1,7 +1,8 @@
 import unittest
+import json
 from unittest.mock import patch
 
-from backend.services.chat_service import ChatService
+from backend.services.chat_service import ChatService, WEAK_EVIDENCE_PREFIX
 
 
 def _chunk(chunk_id: str, doc_id: str, content: str, score: float = 0.9, filename: str | None = None) -> dict:
@@ -49,6 +50,23 @@ class StubModel:
         return "stub answer"
 
 
+class ConversationAwareModel:
+    def __init__(self, rewritten_question: str, answer_text: str = "stub answer") -> None:
+        self.rewritten_question = rewritten_question
+        self.answer_text = answer_text
+        self.last_prompt: str | None = None
+        self.prompts: list[str] = []
+
+    def generate_text(self, prompt: str, max_new_tokens: int = 1500, images=None) -> str:  # noqa: ARG002
+        self.prompts.append(prompt)
+        if "Return ONLY JSON with keys: standalone_question, confidence." in prompt:
+            return json.dumps({"standalone_question": self.rewritten_question, "confidence": 0.93})
+        if "Updated memory summary:" in prompt:
+            return "User focuses on invoice customers and asks follow-up basis questions."
+        self.last_prompt = prompt
+        return self.answer_text
+
+
 class StubRouter:
     def __init__(self, route: dict) -> None:
         self.route_payload = route
@@ -57,7 +75,105 @@ class StubRouter:
         return dict(self.route_payload)
 
 
+class CoverageGapRetrieval:
+    def __init__(self, primary_doc_cap: int = 4) -> None:
+        self.primary_doc_cap = max(1, int(primary_doc_cap))
+        self.calls: list[tuple] = []
+
+    def search(self, query: str, top_k: int = 5, doc_ids=None, mode: str | None = None, use_rerank: bool = True):
+        doc_scope = tuple(doc_ids or [])
+        self.calls.append(("search", query, top_k, doc_scope, mode, use_rerank))
+        if mode in {"sparse", "hybrid"} and doc_scope:
+            return [
+                _chunk(
+                    f"probe-{mode}-{doc_id}-{idx}",
+                    str(doc_id),
+                    f"Invoice customer evidence for {doc_id}",
+                    score=0.66 - (idx * 0.001),
+                )
+                for idx, doc_id in enumerate(doc_scope[: max(1, top_k)])
+            ]
+        if doc_scope:
+            doc_id = str(doc_scope[0])
+            return [_chunk(f"forced-{doc_id}", doc_id, f"Customer entity for {doc_id}", score=0.71)]
+        return []
+
+    def search_balanced(
+        self,
+        query: str,
+        top_k: int = 8,
+        doc_ids=None,
+        per_doc_limit: int = 4,
+        mode: str | None = None,
+        use_rerank: bool = True,
+    ):
+        doc_scope = tuple(doc_ids or [])
+        self.calls.append(("search_balanced", query, top_k, doc_scope, per_doc_limit, mode, use_rerank))
+        if not doc_scope:
+            return []
+        covered = [str(doc_id) for doc_id in doc_scope[: self.primary_doc_cap]]
+        return [
+            _chunk(
+                f"balanced-{doc_id}",
+                doc_id,
+                f"Customer entity for {doc_id}",
+                score=0.95 - (idx * 0.01),
+            )
+            for idx, doc_id in enumerate(covered[: max(1, top_k)])
+        ]
+
+
 class ChatServiceCrossDocTests(unittest.TestCase):
+    def test_named_document_summary_repairs_cross_doc_route_to_single_doc(self) -> None:
+        route = {
+            "task_type": "qa",
+            "needs_cross_doc": True,
+            "needs_image_reasoning": False,
+            "retrieval_plan": {"strategy": "balanced", "top_k": 6, "per_doc_limit": 2},
+            "analysis_plan": {"query_entities": ["crunchy data agreement"]},
+            "confidence": 0.91,
+        }
+        retrieval = StubRetrieval(
+            balanced_chunks=[_chunk("c1", "doc-other", "Wrong cross-doc evidence.", 0.93, filename="other.pdf")],
+            search_chunks=[
+                _chunk(
+                    "s1",
+                    "doc-crunchy",
+                    "Crunchy Data mutual NDA summary evidence.",
+                    0.94,
+                    filename="NDA AND MSA/Ashnik Mutual NDA Crunchy Data- Signed by Ashnik.pdf",
+                )
+            ],
+        )
+        service = ChatService(retrieval, model=None, enable_vlm=False, router=StubRouter(route))
+        docs = [
+            {
+                "id": "doc-crunchy",
+                "filename": "NDA AND MSA/Ashnik Mutual NDA Crunchy Data- Signed by Ashnik.pdf",
+                "status": "ready",
+                "created_at": "2026-01-01",
+                "metadata": {"title": "Microsoft Word - Ashnik Mutual NDA Crunchy Data.docx"},
+            },
+            {
+                "id": "doc-other",
+                "filename": "NDA AND MSA/Other Agreement.pdf",
+                "status": "ready",
+                "created_at": "2026-01-01",
+                "metadata": {"title": "Other Agreement"},
+            },
+        ]
+
+        with patch("backend.services.chat_service.storage.list_documents", return_value=docs):
+            response = service.answer("summarize the crunchy data agreement", doc_ids=None, top_k=5)
+
+        self.assertEqual("qa", response["intent"])
+        self.assertFalse(response["route"]["needs_cross_doc"])
+        self.assertEqual("llm_router_named_doc_summary_repair", response["route"]["source"])
+        search_calls = [call for call in retrieval.calls if call[0] == "search"]
+        self.assertTrue(search_calls)
+        self.assertFalse(any(call[0] == "search_balanced" for call in retrieval.calls))
+        self.assertEqual(("doc-crunchy",), search_calls[0][3])
+
     def test_cross_doc_qa_uses_qa_prompt_and_balanced_retrieval(self) -> None:
         route = {
             "task_type": "qa",
@@ -92,6 +208,164 @@ class ChatServiceCrossDocTests(unittest.TestCase):
         self.assertNotIn("Required output order", model.last_prompt or "")
         self.assertNotIn("Key changes over time", model.last_prompt or "")
 
+    def test_chat_service_logs_route_and_answer_diagnostics(self) -> None:
+        route = {
+            "task_type": "qa",
+            "needs_cross_doc": True,
+            "needs_numeric_extraction": False,
+            "needs_image_reasoning": False,
+            "retrieval_plan": {"strategy": "balanced", "top_k": 6, "per_doc_limit": 3},
+            "analysis_plan": {"query_entities": ["customers"], "evidence_classes": ["invoice"]},
+            "confidence": 0.95,
+            "source": "stub_router",
+        }
+        retrieval = StubRetrieval(
+            balanced_chunks=[
+                _chunk("c1", "doc-a", "Sysdig Inc is based in the United States.", 0.93),
+                _chunk("c2", "doc-b", "NCS Pte Ltd is based in Singapore.", 0.91),
+            ],
+            search_chunks=[],
+        )
+        service = ChatService(retrieval, model=None, enable_vlm=False, router=StubRouter(route))
+
+        with self.assertLogs("backend.services.chat_service", level="INFO") as captured:
+            response = service.answer(
+                "List all customers and where they are based",
+                doc_ids=["doc-a", "doc-b"],
+                top_k=5,
+            )
+
+        self.assertEqual("qa", response["intent"])
+        log_text = "\n".join(captured.output)
+        self.assertIn("chat.route", log_text)
+        self.assertIn("chat.answer", log_text)
+        self.assertIn('"task_type": "qa"', log_text)
+        self.assertIn('"needs_cross_doc": true', log_text)
+        self.assertIn('"needs_image_reasoning": false', log_text)
+        self.assertIn('"retrieval_plan"', log_text)
+        self.assertIn('"chunk_summary"', log_text)
+
+    def test_followup_question_is_rewritten_with_conversation_context(self) -> None:
+        route = {
+            "task_type": "qa",
+            "needs_cross_doc": False,
+            "needs_image_reasoning": False,
+            "retrieval_plan": {"strategy": "semantic", "top_k": 6, "per_doc_limit": 2},
+            "confidence": 0.92,
+        }
+        rewritten = "By what basis are NCS Pte Ltd and OCBC Bank considered customers in the invoices?"
+        retrieval = StubRetrieval(
+            balanced_chunks=[],
+            search_chunks=[_chunk("conv-1", "doc-a", "Customer field in invoices defines the billed account.")],
+        )
+        model = ConversationAwareModel(rewritten_question=rewritten, answer_text="Customers are entities named in the invoice customer field.")
+        service = ChatService(retrieval, model, enable_vlm=True, router=StubRouter(route))
+
+        session_record = {
+            "id": "conv-123",
+            "created_at": "2026-03-01T00:00:00+00:00",
+            "updated_at": "2026-03-01T00:00:00+00:00",
+            "summary": "User asked for all customers in invoice documents.",
+            "metadata": {},
+        }
+        prior_messages = [
+            {
+                "id": "m1",
+                "session_id": "conv-123",
+                "role": "user",
+                "content": "List all the customers in the invoices.",
+                "created_at": "2026-03-01T00:00:01+00:00",
+                "metadata": {},
+            },
+            {
+                "id": "m2",
+                "session_id": "conv-123",
+                "role": "assistant",
+                "content": "NCS Pte Ltd, OCBC Bank, and others are listed as customers.",
+                "created_at": "2026-03-01T00:00:02+00:00",
+                "metadata": {},
+            },
+        ]
+
+        with (
+            patch("backend.services.chat_service.storage.get_chat_session", return_value=session_record),
+            patch("backend.services.chat_service.storage.list_chat_messages", return_value=prior_messages),
+            patch("backend.services.chat_service.storage.upsert_chat_session", return_value=session_record),
+            patch("backend.services.chat_service.storage.add_chat_message") as add_chat_message,
+            patch("backend.services.chat_service.storage.list_documents", return_value=[]),
+        ):
+            response = service.answer(
+                "By what basis are they considered to be customers?",
+                doc_ids=["doc-a"],
+                top_k=4,
+                conversation_id="conv-123",
+            )
+
+        self.assertEqual("conv-123", response.get("conversation_id"))
+        self.assertEqual(rewritten, response.get("resolved_question"))
+        self.assertTrue(retrieval.calls)
+        search_queries = [str(call[1]) for call in retrieval.calls if call[0] == "search"]
+        self.assertIn(rewritten, search_queries)
+        self.assertGreaterEqual(add_chat_message.call_count, 2)
+
+    def test_list_query_scopes_to_invoice_docs_and_recovers_missing_doc_coverage(self) -> None:
+        route = {
+            "task_type": "qa",
+            "needs_cross_doc": True,
+            "needs_image_reasoning": False,
+            "retrieval_plan": {"strategy": "balanced", "top_k": 6, "per_doc_limit": 2},
+            "expected_answer_type": "list",
+            "confidence": 0.93,
+        }
+        retrieval = CoverageGapRetrieval(primary_doc_cap=4)
+        service = ChatService(retrieval, model=None, enable_vlm=False, router=StubRouter(route))
+
+        invoice_docs = [
+            {
+                "id": f"doc-invoice-{idx}",
+                "filename": f"invoices/customer_{idx}.pdf",
+                "status": "ready",
+                "created_at": "2026-01-01",
+                "metadata": {"doc_type": "invoice", "auto_tags": ["invoice", "customer"]},
+            }
+            for idx in range(1, 8)
+        ]
+        proposal_doc = {
+            "id": "doc-proposal",
+            "filename": "proposals/customer_scope.docx",
+            "status": "ready",
+            "created_at": "2026-01-01",
+            "metadata": {"doc_type": "proposal", "auto_tags": ["proposal", "customer"]},
+        }
+        all_docs = invoice_docs + [proposal_doc]
+        selected_doc_ids = [str(doc["id"]) for doc in all_docs]
+        expected_invoice_ids = {str(doc["id"]) for doc in invoice_docs}
+
+        with patch("backend.services.chat_service.storage.list_documents", return_value=all_docs):
+            response = service.answer(
+                "List all customers in the invoices",
+                doc_ids=selected_doc_ids,
+                top_k=6,
+            )
+
+        self.assertEqual("qa", response["intent"])
+
+        balanced_calls = [call for call in retrieval.calls if call[0] == "search_balanced"]
+        self.assertTrue(balanced_calls)
+        balanced_scope = set(balanced_calls[0][3])
+        self.assertEqual(expected_invoice_ids, balanced_scope)
+        self.assertNotIn("doc-proposal", balanced_scope)
+
+        forced_calls = [
+            call for call in retrieval.calls
+            if call[0] == "search" and call[4] not in {"sparse", "hybrid"} and len(call[3]) == 1
+        ]
+        forced_doc_ids = {str(call[3][0]) for call in forced_calls}
+        self.assertGreaterEqual(len(forced_doc_ids), 3)
+
+        source_doc_ids = {str(source.get("doc_id") or "") for source in response["sources"]}
+        self.assertEqual(expected_invoice_ids, source_doc_ids)
+
     def test_compare_still_uses_compare_prompt(self) -> None:
         route = {
             "task_type": "compare",
@@ -115,6 +389,38 @@ class ChatServiceCrossDocTests(unittest.TestCase):
         self.assertEqual("compare", response["intent"])
         self.assertIsNotNone(model.last_prompt)
         self.assertIn("document comparison assistant", (model.last_prompt or "").lower())
+
+    def test_compare_flow_preserves_conflicting_evidence_from_both_documents(self) -> None:
+        route = {
+            "task_type": "compare",
+            "needs_cross_doc": True,
+            "needs_image_reasoning": False,
+            "retrieval_plan": {"strategy": "hybrid", "top_k": 6, "per_doc_limit": 2},
+            "confidence": 0.95,
+        }
+        retrieval = StubRetrieval(
+            balanced_chunks=[
+                _chunk("cmp-a", "doc-a", "The renewal term is 12 months after signature.", 0.94, filename="agreement_a.pdf"),
+                _chunk("cmp-b", "doc-b", "The renewal term is 24 months after signature.", 0.93, filename="agreement_b.pdf"),
+            ],
+            search_chunks=[],
+        )
+        service = ChatService(retrieval, model=None, enable_vlm=False, router=StubRouter(route))
+
+        response = service.answer(
+            "Compare the renewal term between the two agreements.",
+            doc_ids=["doc-a", "doc-b"],
+            top_k=5,
+        )
+
+        self.assertEqual("compare", response["intent"])
+        self.assertIn("Key points by document:", response["answer"])
+        self.assertIn("agreement_a.pdf", response["answer"])
+        self.assertIn("agreement_b.pdf", response["answer"])
+        self.assertIn("12 months", response["answer"])
+        self.assertIn("24 months", response["answer"])
+        source_doc_ids = {str(source.get("doc_id") or "") for source in response["sources"]}
+        self.assertEqual({"doc-a", "doc-b"}, source_doc_ids)
 
     def test_heuristic_fallback_keeps_cross_doc_qa(self) -> None:
         retrieval = StubRetrieval(
@@ -182,8 +488,140 @@ class ChatServiceCrossDocTests(unittest.TestCase):
 
         response = service.answer("What services does Lakerunner provide to Airtel?", doc_ids=["doc-a"])
 
-        self.assertIn("partial evidence", response["answer"].lower())
+        self.assertTrue(response["answer"].startswith(WEAK_EVIDENCE_PREFIX))
         self.assertNotEqual("I cannot find the answer in the provided documents.", response["answer"].strip())
+
+    def test_prompt_and_sources_use_selected_evidence_span_instead_of_full_chunk(self) -> None:
+        route = {
+            "task_type": "qa",
+            "needs_cross_doc": False,
+            "needs_image_reasoning": False,
+            "retrieval_plan": {"strategy": "hybrid", "top_k": 6, "per_doc_limit": 2},
+            "confidence": 0.95,
+        }
+        chunk_text = (
+            "Vendor onboarding checklist is attached for reference and internal routing only. "
+            "The agreement effective date is 14 March 2015 for the initial subscription term. "
+            "Appendix notes the mailing room code for archived paperwork and courier handling."
+        )
+        retrieval = StubRetrieval(
+            balanced_chunks=[],
+            search_chunks=[_chunk("span-1", "doc-a", chunk_text, 0.92)],
+        )
+        model = StubModel()
+        service = ChatService(retrieval, model, enable_vlm=True, router=StubRouter(route))
+
+        response = service.answer("What is the agreement effective date?", doc_ids=["doc-a"], top_k=5)
+
+        self.assertIsNotNone(model.last_prompt)
+        self.assertIn("The agreement effective date is 14 March 2015 for the initial subscription term.", model.last_prompt or "")
+        self.assertNotIn("Vendor onboarding checklist is attached for reference and internal routing only.", model.last_prompt or "")
+        self.assertTrue(response["sources"])
+        self.assertEqual(
+            "The agreement effective date is 14 March 2015 for the initial subscription term.",
+            response["sources"][0]["content"],
+        )
+
+    def test_selected_evidence_span_keeps_original_source_provenance(self) -> None:
+        route = {
+            "task_type": "qa",
+            "needs_cross_doc": False,
+            "needs_image_reasoning": False,
+            "retrieval_plan": {"strategy": "hybrid", "top_k": 6, "per_doc_limit": 2},
+            "confidence": 0.95,
+        }
+        chunk_text = (
+            "Vendor onboarding checklist is attached for reference and internal routing only. "
+            "The agreement effective date is 14 March 2015 for the initial subscription term. "
+            "Appendix notes the mailing room code for archived paperwork and courier handling."
+        )
+        chunk = _chunk("span-3", "doc-a", chunk_text, 0.92)
+        chunk["page"] = 7
+        retrieval = StubRetrieval(
+            balanced_chunks=[],
+            search_chunks=[chunk],
+        )
+        service = ChatService(retrieval, model=None, enable_vlm=False, router=StubRouter(route))
+
+        response = service.answer("What is the agreement effective date?", doc_ids=["doc-a"], top_k=5)
+
+        self.assertTrue(response["sources"])
+        source = response["sources"][0]
+        self.assertEqual("span-3", source["id"])
+        self.assertEqual("doc-a", source["doc_id"])
+        self.assertEqual(7, source["page"])
+        self.assertEqual("text", source["source_type"])
+        self.assertEqual(
+            "The agreement effective date is 14 March 2015 for the initial subscription term.",
+            source["content"],
+        )
+        self.assertTrue(source["metadata"].get("selected_span"))
+
+    def test_fallback_answer_uses_selected_evidence_span_for_grounding(self) -> None:
+        route = {
+            "task_type": "qa",
+            "needs_cross_doc": False,
+            "needs_image_reasoning": False,
+            "retrieval_plan": {"strategy": "hybrid", "top_k": 6, "per_doc_limit": 2},
+            "confidence": 0.95,
+        }
+        chunk_text = (
+            "Vendor onboarding checklist is attached for reference and internal routing only. "
+            "The agreement effective date is 14 March 2015 for the initial subscription term. "
+            "Appendix notes the mailing room code for archived paperwork and courier handling."
+        )
+        retrieval = StubRetrieval(
+            balanced_chunks=[],
+            search_chunks=[_chunk("span-2", "doc-a", chunk_text, 0.92)],
+        )
+        service = ChatService(retrieval, model=None, enable_vlm=False, router=StubRouter(route))
+
+        response = service.answer("What is the agreement effective date?", doc_ids=["doc-a"], top_k=5)
+
+        self.assertIn("The agreement effective date is 14 March 2015 for the initial subscription term.", response["answer"])
+        self.assertNotIn("Vendor onboarding checklist is attached for reference and internal routing only.", response["answer"])
+        self.assertTrue(response["sources"])
+        self.assertEqual(
+            "The agreement effective date is 14 March 2015 for the initial subscription term.",
+            response["sources"][0]["content"],
+        )
+
+    def test_weak_evidence_fallback_uses_exact_required_prefix(self) -> None:
+        route = {
+            "task_type": "qa",
+            "needs_cross_doc": False,
+            "needs_image_reasoning": False,
+            "retrieval_plan": {"strategy": "hybrid", "top_k": 6, "per_doc_limit": 2},
+            "confidence": 0.95,
+        }
+        retrieval = StubRetrieval(
+            balanced_chunks=[],
+            search_chunks=[_chunk("weak-1", "doc-a", "Lakerunner provides ServiceNow CMDB integration support to Airtel.", 0.91)],
+        )
+        service = ChatService(retrieval, model=None, enable_vlm=False, router=StubRouter(route))
+
+        response = service.answer("What services does Lakerunner provide to Airtel?", doc_ids=["doc-a"])
+
+        self.assertTrue(response["answer"].startswith(WEAK_EVIDENCE_PREFIX))
+        self.assertNotIn("I found partial evidence", response["answer"])
+
+    def test_weak_evidence_prefix_is_exact_first_line(self) -> None:
+        route = {
+            "task_type": "qa",
+            "needs_cross_doc": False,
+            "needs_image_reasoning": False,
+            "retrieval_plan": {"strategy": "hybrid", "top_k": 6, "per_doc_limit": 2},
+            "confidence": 0.95,
+        }
+        retrieval = StubRetrieval(
+            balanced_chunks=[],
+            search_chunks=[_chunk("weak-2", "doc-a", "Lakerunner provides ServiceNow CMDB integration support to Airtel.", 0.91)],
+        )
+        service = ChatService(retrieval, model=None, enable_vlm=False, router=StubRouter(route))
+
+        response = service.answer("What services does Lakerunner provide to Airtel?", doc_ids=["doc-a"])
+
+        self.assertEqual(WEAK_EVIDENCE_PREFIX, response["answer"].splitlines()[0])
 
     def test_invoice_fallback_prefers_invoice_chunks_over_proposal_chunks(self) -> None:
         retrieval = StubRetrieval(balanced_chunks=[], search_chunks=[])
@@ -493,7 +931,7 @@ class ChatServiceCrossDocTests(unittest.TestCase):
         with patch("backend.services.chat_service.storage.list_documents", return_value=fake_docs):
             response = service.answer("Which NDAs were signed in 2018?", doc_ids=None, top_k=5)
 
-        self.assertIn("partial evidence", response["answer"].lower())
+        self.assertTrue(response["answer"].startswith(WEAK_EVIDENCE_PREFIX))
         self.assertTrue(any(call[0] == "search_balanced" for call in retrieval.calls))
 
     def test_count_task_without_count_signal_is_treated_as_list_metadata_query(self) -> None:

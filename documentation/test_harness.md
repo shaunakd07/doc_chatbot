@@ -1,160 +1,245 @@
 # Test Harness Stack
 
-## Purpose
+This document describes the current harness implementation under `tests/harness/`.
 
-This harness operationalizes the test strategy in [tests.md](D:/shaun/Projects/doc_chatbot/docs/tests.md) without hardcoding one-off scripts.
+## 1. Purpose
 
-It supports:
+The harness operationalizes higher-level ingestion, retrieval, chat, and persistence checks without hardcoding one-off scripts.
 
-1. API-driven ingestion/retrieval test execution.
-2. DB integrity inspection (SQLite or Postgres).
-3. Deterministic test corpus selection from `test_docs/`.
-4. Per-case evidence capture in machine-readable artifacts.
-5. Dry-run planning mode (no API calls) and execute mode.
+It currently supports:
 
-## Prerequisites
+1. API-driven upload, poll, chat, and delete flows
+2. SQLite or PostgreSQL inspection
+3. deterministic corpus selection from YAML selectors
+4. run artifacts and per-case evidence capture
+5. dry-run planning and execute mode
+6. optional managed backend process startup
 
-1. Python environment with `requirements.txt` installed (harness uses `httpx` and `PyYAML` directly).
-2. `test_docs/` populated with the corpus referenced by `tests/harness/scenarios/datasets.yaml`.
-3. For `execute` mode: running backend API (`/api/health`, `/api/documents`, `/api/chat`) and configured DB access for inspector checks.
+Related doc:
 
-## Layout
+- [tests.md](tests.md)
 
-- `tests/harness/types.py`: dataclasses for selectors, probes, conditions, cases, profiles.
-- `tests/harness/config.py`: YAML loading/parsing and case/profile selection.
-- `tests/harness/catalog.py`: deterministic dataset selector resolution.
-- `tests/harness/api_client.py`: API client wrapper for upload/poll/chat/delete.
-- `tests/harness/db_inspector.py`: DB table/doc/chunk/embedding/graph inspection.
-- `tests/harness/assertions.py`: condition evaluation engine.
-- `tests/harness/evidence.py`: timeline + artifact writer.
-- `tests/harness/log_capture.py`: optional managed backend process logging.
-- `tests/harness/runner.py`: core case orchestration.
-- `tests/harness/cli.py`: CLI entrypoint.
-- `scripts/run_test_harness.py`: convenience launcher.
-- `tests/harness/scenarios/datasets.yaml`: file selectors.
-- `tests/harness/scenarios/cases.yaml`: A-H case manifest.
-- `tests/harness/scenarios/profiles.yaml`: runnable profile definitions.
+## 2. Current layout
 
-## Core Modes
+- `tests/harness/types.py`
+  Dataclasses for selectors, cases, probes, conditions, and summaries.
+
+- `tests/harness/config.py`
+  Loads selectors, cases, and profiles from YAML.
+
+- `tests/harness/catalog.py`
+  Resolves dataset selectors to deterministic file lists.
+
+- `tests/harness/api_client.py`
+  Wrapper for `/api/health`, `/api/documents`, `/api/chat`, and delete flows.
+
+- `tests/harness/db_inspector.py`
+  DB inspection utilities for SQLite and PostgreSQL.
+
+- `tests/harness/assertions.py`
+  Implements the assertion engine used by case checks.
+
+- `tests/harness/evidence.py`
+  Writes event streams, snapshots, and summaries.
+
+- `tests/harness/log_capture.py`
+  Optional managed backend process logging.
+
+- `tests/harness/runner.py`
+  Core orchestration for case execution.
+
+- `tests/harness/cli.py`
+  Command-line entrypoint.
+
+- `scripts/run_test_harness.py`
+  Thin launcher that forwards to the CLI.
+
+- `tests/harness/scenarios/datasets.yaml`
+  Canonical dataset selectors.
+
+- `tests/harness/scenarios/cases.yaml`
+  Full case manifest.
+
+- `tests/harness/scenarios/profiles.yaml`
+  Runnable profile definitions.
+
+## 3. Modes
 
 ### `dry-run`
 
-- Resolves dataset selectors.
-- Selects cases by profile.
-- Writes run plan and case snapshots.
-- Does **not** call API or DB mutation endpoints.
+Behavior:
+
+- loads selectors, cases, and profiles
+- resolves datasets
+- selects cases for the chosen profile
+- writes run metadata and planned case snapshots
+- does not call the backend or mutate the DB
+
+Use this when:
+
+- verifying selector paths
+- reviewing which cases a profile will run
+- checking evidence output structure without touching the app
 
 ### `execute`
 
-- Calls API endpoints for upload/poll/chat/delete.
-- Collects DB evidence and assertions.
-- Writes summary + per-case outputs.
+Behavior:
 
-## Commands
+- calls the backend API
+- waits for documents to reach terminal states when configured
+- runs chat probes
+- captures DB evidence
+- evaluates assertions
+- writes full run artifacts
+
+Use this when you need a real validation pass against the running app.
+
+## 4. Current CLI surface
+
+The harness CLI in `tests/harness/cli.py` currently supports:
+
+- `--mode dry-run|execute`
+- `--profile`
+- `--api-base-url`
+- `--api-timeout-sec`
+- `--datasets-file`
+- `--cases-file`
+- `--profiles-file`
+- `--evidence-root`
+- `--run-id`
+- `--manage-app`
+- `--app-cmd`
+- `--startup-timeout-sec`
+- `--db-backend`
+- `--sqlite-db-path`
+- `--database-url`
+
+This is the authoritative flag set; older docs that mention different knobs are stale.
+
+## 5. Commands
 
 Run from repo root.
 
 ### Dry-run smoke
 
-```bash
-python scripts/run_test_harness.py --mode dry-run --profile smoke
+```powershell
+.\.venv312\Scripts\python.exe scripts/run_test_harness.py --mode dry-run --profile smoke
 ```
 
-### Execute small regression against running backend
+### Execute against an already running backend
 
-```bash
-python scripts/run_test_harness.py --mode execute --profile small_regression --api-base-url http://127.0.0.1:8000
+```powershell
+.\.venv312\Scripts\python.exe scripts/run_test_harness.py --mode execute --profile small_regression --api-base-url http://127.0.0.1:8000
 ```
 
-### Execute with managed app process
+### Execute with managed backend startup
 
-```bash
-python scripts/run_test_harness.py --mode execute --profile smoke --manage-app
+```powershell
+.\.venv312\Scripts\python.exe scripts/run_test_harness.py --mode execute --profile smoke --manage-app --app-cmd ".venv312\\Scripts\\python.exe -m backend.app"
 ```
 
-Optional managed app command override:
+If `--app-cmd` is omitted in managed-app mode, the harness defaults to the current Python interpreter with `-m backend.app`.
 
-```bash
-python scripts/run_test_harness.py --mode execute --profile smoke --manage-app --app-cmd ".venv312\\Scripts\\python.exe -m backend.app"
-```
+## 6. Current profiles
 
-## Evidence Artifacts
+The current profiles in `tests/harness/scenarios/profiles.yaml` are:
 
-By default, each run writes to:
+- `smoke`
+- `small_regression`
+- `medium_scale`
+- `full_automated`
+- `full_longrun`
+- `manual_resilience`
+
+These profiles are the supported entrypoints for routine harness use.
+
+## 7. Current assertion coverage
+
+Implemented condition kinds in `tests/harness/assertions.py`:
+
+- `doc_count_equals`
+- `all_docs_ready`
+- `each_doc_num_pages_gt`
+- `each_doc_min_chunks`
+- `each_doc_embeddings_match_chunks`
+- `any_doc_has_source_types`
+- `each_doc_has_source_types`
+- `each_doc_min_diagram_graphs`
+- `chat_non_empty`
+- `chat_sources_scoped`
+- `chat_any_error`
+- `chat_expected_errors`
+- `db_table_non_empty`
+- `db_table_empty`
+- `single_embedding_dim`
+
+If a case references an unknown condition kind, the harness records a `skip` instead of crashing.
+
+## 8. Evidence artifacts
+
+By default each run writes to:
 
 - `harness_runs/<run_id>/`
 
-Key files:
+Common artifacts:
 
-1. `summary.json`: machine-readable run summary.
-2. `summary.md`: human-readable summary.
-3. `events/timeline.jsonl`: timestamped event stream.
-4. `snapshots/run_context.json`: run metadata and selected case IDs.
-5. `snapshots/cases/<case_id>.json`: full per-case evidence.
-6. `api/health.json`: health snapshot (or dry-run note).
-7. `logs/managed_app.log`: backend output (managed app mode).
+1. `summary.json`
+2. `summary.md`
+3. `events/timeline.jsonl`
+4. `snapshots/run_context.json`
+5. `snapshots/cases/<case_id>.json`
+6. `api/health.json`
+7. `logs/managed_app.log` when managed-app mode is used
 
-## Dataset Selectors
+These outputs are intended to support post-run triage without an immediate rerun.
 
-Supported selector kinds:
+## 9. Dataset selectors
 
-1. `file`: single file path.
-2. `paths`: explicit file list.
-3. `dir_all`: all files matching pattern in dir.
-4. `dir_first_n`: deterministic first N files matching pattern.
-5. `glob`: pattern search (recursive configurable).
+Current selector kinds supported by the harness configuration layer:
 
-Selectors are deterministic and sorted naturally to keep repeated runs comparable.
+1. `file`
+2. `paths`
+3. `dir_all`
+4. `dir_first_n`
+5. `glob`
 
-## Assertion Engine Coverage
+Selectors are resolved deterministically so that repeated runs remain comparable.
 
-Implemented condition kinds:
+## 10. Safety defaults
 
-1. `doc_count_equals`
-2. `all_docs_ready`
-3. `each_doc_num_pages_gt`
-4. `each_doc_min_chunks`
-5. `each_doc_embeddings_match_chunks`
-6. `any_doc_has_source_types`
-7. `each_doc_has_source_types`
-8. `each_doc_min_diagram_graphs`
-9. `chat_non_empty`
-10. `chat_sources_scoped`
-11. `chat_any_error`
-12. `chat_expected_errors`
-13. `db_table_non_empty`
-14. `db_table_empty`
-15. `single_embedding_dim`
+Current harness defaults from `tests/harness/scenarios/cases.yaml` include:
 
-Unknown condition kinds are recorded as `skip` rather than crashing the run.
+- `reset_before: true`
+- `delete_after: false`
+- `delete_all_after: false`
+- `wait_ready: true`
+- `ready_timeout_sec: 2400`
+- `poll_interval_sec: 3.0`
 
-## Case Automation Levels
+Operational effect:
 
-From `cases.yaml`:
+- cases usually start from a clean document store
+- long-running OCR/diagram cases are given substantial ready-timeout headroom
 
-1. `full`: expected to run headlessly.
-2. `partial`: mostly automated, but interpretation/environment may require review.
-3. `manual`: operator-required (e.g., restart-resilience scenarios).
+## 11. Current limitations
 
-Profiles control whether manual cases are included.
+- Environment-dependent behavior such as Tesseract availability, LibreOffice rendering, and GPU configuration still affects outcomes.
+- Large corpus cases can take a long time; use the smaller profiles for routine iteration.
+- The harness validates backend behavior, not rich frontend interaction flows.
+- Restart/resilience scenarios are still manual by design.
 
-## Safety and Reproducibility
+## 12. How to extend it
 
-1. Default behavior is case-level reset (`DELETE /api/documents`) before each case.
-2. Scale cases are isolated via profile selection.
-3. Dataset selection is deterministic.
-4. Case artifacts include enough evidence for post-run triage without rerun.
+To add a new automated scenario:
 
-## Extension Guide
-
-To add a new test:
-
-1. Add/extend selectors in `datasets.yaml`.
-2. Add case in `cases.yaml`.
-3. Add/adjust profile entries in `profiles.yaml`.
-4. If needed, implement new assertion kinds in `assertions.py`.
+1. add or update dataset selectors in `datasets.yaml`
+2. add a case in `cases.yaml`
+3. add the case to an existing profile or create a new profile in `profiles.yaml`
+4. implement any new assertion kind in `assertions.py` if needed
 
 To add a new evidence type:
 
-1. Extend runner collection logic.
-2. Write to `snapshots/cases/<case_id>.json` and/or structured subfolder.
+1. extend `runner.py`
+2. write the new payload into the case snapshot or a dedicated artifact path
+
+When updating the harness docs, prefer the YAML files and CLI implementation as the source of truth.

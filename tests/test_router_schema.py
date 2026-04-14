@@ -54,6 +54,34 @@ class RouterSchemaTests(unittest.TestCase):
         self.assertTrue(classes)
         self.assertEqual("invoice", classes[0].lower())
 
+    def test_openai_router_parses_exact_lookup_hints(self) -> None:
+        router = OpenAIRouterService(model_id="gpt-4o-mini", api_key="test-key")
+        parsed = router._parse_route_json(
+            """
+            {
+              "task_type": "compare",
+              "needs_cross_doc": true,
+              "needs_numeric_extraction": false,
+              "needs_image_reasoning": false,
+              "retrieval_plan": {"strategy": "balanced", "top_k": 10, "per_doc_limit": 2},
+              "analysis_plan": {
+                "query_entities": ["nda alpha", "nda beta"],
+                "target_documents": ["nda_alpha.txt", "nda_beta.txt"],
+                "exact_lookup_requested": true,
+                "fact_types": ["date", "amount", "ignored"]
+              },
+              "confidence": 0.84,
+              "rationale": "compare exact facts"
+            }
+            """
+        )
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        plan = parsed["analysis_plan"]
+        self.assertTrue(plan.get("exact_lookup_requested"))
+        self.assertEqual(["date", "amount"], plan.get("fact_types"))
+        self.assertEqual(["nda_alpha.txt", "nda_beta.txt"], plan.get("target_documents"))
+
     def test_openai_router_accepts_count_task_type(self) -> None:
         router = OpenAIRouterService(model_id="gpt-4o-mini", api_key="test-key")
         parsed = router._parse_route_json(
