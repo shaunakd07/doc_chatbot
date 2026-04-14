@@ -29,6 +29,8 @@ ENV/
 # Project runtime data (uploads, processed artifacts, local DB/index)
 data/
 harness_runs/
+test-results/
+tests/
 documentation/
 diagrams/
 docs/
