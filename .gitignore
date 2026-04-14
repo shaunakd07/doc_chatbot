@@ -29,6 +29,7 @@ ENV/
 # Project runtime data (uploads, processed artifacts, local DB/index)
 data/
 harness_runs/
+documentation/
 
 # Large local datasets / media dumps
 spdocvqa_images/
