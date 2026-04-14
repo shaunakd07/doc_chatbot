@@ -30,6 +30,11 @@ ENV/
 data/
 harness_runs/
 documentation/
+diagrams/
+docs/
+icons/
+tools/
+.code/
 
 # Large local datasets / media dumps
 spdocvqa_images/
